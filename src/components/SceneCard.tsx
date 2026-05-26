@@ -1,5 +1,6 @@
 import type { Scene } from "@/lib/services/story.functions";
 import { GlassCard } from "./GlassCard";
+import { SceneImage } from "./SceneImage";
 import { Image as ImageIcon, Mic } from "lucide-react";
 
 interface SceneCardProps {
@@ -22,6 +23,11 @@ export function SceneCard({ scene, delayMs = 0 }: SceneCardProps) {
           <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
             {scene.description}
           </p>
+
+          {/* AI-generated scene image */}
+          <div className="mt-4">
+            <SceneImage prompt={scene.imagePrompt} seed={scene.index} />
+          </div>
 
           <div className="mt-4 space-y-2.5">
             <div className="flex items-start gap-2 text-xs">
@@ -53,3 +59,4 @@ export function SceneCard({ scene, delayMs = 0 }: SceneCardProps) {
     </GlassCard>
   );
 }
+
