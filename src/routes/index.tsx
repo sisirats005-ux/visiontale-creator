@@ -24,6 +24,15 @@ import type {
   SceneWithNarration,
 } from "@/lib/types/character.types";
 
+type SceneImageState = { url: string; model: string; isPlaceholder?: boolean } | null;
+type ImageQueueItem = { sceneIndex: number; force: boolean };
+
+const SCENE_IMAGE_QUEUE_DELAY_MS = 1_500;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export const Route = createFileRoute("/")({
   component: HomePage,
   head: () => ({
@@ -76,11 +85,16 @@ function HomePage() {
   const [characters, setCharacters] = useState<CharacterInput[]>([]);
 
   const [sceneNarrations, setSceneNarrations] = useState<NarrationAudio[]>([]);
-  const [sceneImages, setSceneImages] = useState<
-    Array<{ url: string; model: string; isPlaceholder?: boolean } | null>
-  >([]);
+  const [sceneImages, setSceneImages] = useState<SceneImageState[]>([]);
   const [generatingImageIndex, setGeneratingImageIndex] = useState<number | null>(null);
+  const [queuedImageIndexes, setQueuedImageIndexes] = useState<Set<number>>(() => new Set());
   const imageInFlightRef = useRef<Record<number, boolean>>({});
+  const imageQueuedRef = useRef<Record<number, boolean>>({});
+  const imageQueueRef = useRef<ImageQueueItem[]>([]);
+  const imageQueueProcessingRef = useRef(false);
+  const imageQueueTokenRef = useRef(0);
+  const resultRef = useRef<StoryResultType | null>(null);
+  const sceneImagesRef = useRef<SceneImageState[]>([]);
   // Track which scene index is currently generating narration (null = none)
   const [generatingNarrationIndex, setGeneratingNarrationIndex] = useState<number | null>(null);
   const narrationInFlightRef = useRef<Record<number, boolean>>({});
@@ -98,6 +112,14 @@ function HomePage() {
   }, []);
 
   useEffect(() => () => revokeNarrationBlobUrls(), [revokeNarrationBlobUrls]);
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  useEffect(() => {
+    sceneImagesRef.current = sceneImages;
+  }, [sceneImages]);
 
   const cinematicScenes = useMemo(
     () =>
@@ -145,6 +167,12 @@ function HomePage() {
     revokeNarrationBlobUrls();
     setSceneNarrations([]);
     setSceneImages([]);
+    setGeneratingImageIndex(null);
+    setQueuedImageIndexes(new Set());
+    imageInFlightRef.current = {};
+    imageQueuedRef.current = {};
+    imageQueueRef.current = [];
+    imageQueueTokenRef.current += 1;
     setNarrationError(null);
     setCooldownMessage(null);
 
@@ -215,84 +243,145 @@ function HomePage() {
     }
   };
 
-  const handleGenerateImage = async (sceneIndex: number, opts?: { force?: boolean }) => {
-    if (!result) return;
-    if (!opts?.force && sceneImages[sceneIndex]?.url) return;
+  const processImageQueue = useCallback(async () => {
+    if (imageQueueProcessingRef.current) return;
 
-    // Enforce exactly ONE in-flight request per scene.
-    if (imageInFlightRef.current[sceneIndex]) return;
-    imageInFlightRef.current[sceneIndex] = true;
-    setGeneratingImageIndex(sceneIndex);
-
-    const scene = result.scenes[sceneIndex];
-    const promptText = scene?.imagePrompt?.trim();
-    if (!promptText) {
-      imageInFlightRef.current[sceneIndex] = false;
-      setGeneratingImageIndex(null);
-      return;
-    }
-
-    console.log(
-      "[VisionTale] Requesting scene image",
-      JSON.stringify({
-        sceneIndex: sceneIndex + 1,
-        seed: scene.index,
-        promptPreview: promptText.slice(0, 100),
-      }),
-    );
+    imageQueueProcessingRef.current = true;
+    const queueToken = imageQueueTokenRef.current;
 
     try {
-      const res = await generateImageFn({
-        data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
-      });
+      while (imageQueueRef.current.length > 0) {
+        if (queueToken !== imageQueueTokenRef.current) break;
 
-      if (!res.result) {
-        console.error("[VisionTale] Scene image generation error:", res.error);
-        return;
-      }
+        const item = imageQueueRef.current.shift();
+        if (!item) continue;
 
-      const finalUrl = res.result.url;
-      if (!finalUrl) {
-        console.error("[VisionTale] Scene image generation returned empty URL");
-        return;
-      }
+        const { sceneIndex, force } = item;
+        imageQueuedRef.current[sceneIndex] = false;
+        setQueuedImageIndexes((prev) => {
+          const next = new Set(prev);
+          next.delete(sceneIndex);
+          return next;
+        });
 
-      if (res.result.isPlaceholder) {
-        console.warn(
-          "[VisionTale] Scene image placeholder used",
-          JSON.stringify({
-            sceneIndex: sceneIndex + 1,
-            optimizedPrompt: res.result.optimizedPrompt,
-            warning: res.error,
-          }),
-        );
-      } else {
+        const currentResult = resultRef.current;
+        if (!currentResult) continue;
+        if (!force && sceneImagesRef.current[sceneIndex]?.url) continue;
+        if (imageInFlightRef.current[sceneIndex]) continue;
+
+        const scene = currentResult.scenes[sceneIndex];
+        const promptText = scene?.imagePrompt?.trim();
+        if (!scene || !promptText) continue;
+
+        imageInFlightRef.current[sceneIndex] = true;
+        setGeneratingImageIndex(sceneIndex);
+
         console.log(
-          "[VisionTale] Scene image ready",
+          "[VisionTale] Requesting queued scene image",
           JSON.stringify({
             sceneIndex: sceneIndex + 1,
-            model: res.result.model,
-            optimizedPromptLength: res.result.optimizedPrompt.length,
+            seed: scene.index,
+            remainingQueued: imageQueueRef.current.length,
+            promptPreview: promptText.slice(0, 100),
           }),
         );
-      }
 
-      setSceneImages((prev) => {
-        const next = [...prev];
-        next[sceneIndex] = {
-          url: finalUrl,
-          model: res.result!.model,
-          isPlaceholder: res.result!.isPlaceholder,
-        };
+        try {
+          const res = await generateImageFn({
+            data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
+          });
+
+          if (queueToken !== imageQueueTokenRef.current) break;
+
+          if (!res.result) {
+            console.error("[VisionTale] Scene image generation error:", res.error);
+            continue;
+          }
+
+          const finalUrl = res.result.url;
+          if (!finalUrl) {
+            console.error("[VisionTale] Scene image generation returned empty URL");
+            continue;
+          }
+
+          if (res.result.isPlaceholder) {
+            console.warn(
+              "[VisionTale] Scene image placeholder used",
+              JSON.stringify({
+                sceneIndex: sceneIndex + 1,
+                optimizedPrompt: res.result.optimizedPrompt,
+                warning: res.error,
+              }),
+            );
+          } else {
+            console.log(
+              "[VisionTale] Scene image ready",
+              JSON.stringify({
+                sceneIndex: sceneIndex + 1,
+                model: res.result.model,
+                optimizedPromptLength: res.result.optimizedPrompt.length,
+              }),
+            );
+          }
+
+          setSceneImages((prev) => {
+            const next = [...prev];
+            next[sceneIndex] = {
+              url: finalUrl,
+              model: res.result!.model,
+              isPlaceholder: res.result!.isPlaceholder,
+            };
+            sceneImagesRef.current = next;
+            return next;
+          });
+        } catch (e) {
+          console.error("[VisionTale] Scene image generation exception:", e);
+        } finally {
+          imageInFlightRef.current[sceneIndex] = false;
+          setGeneratingImageIndex((current) => (current === sceneIndex ? null : current));
+        }
+
+        if (imageQueueRef.current.length > 0 && queueToken === imageQueueTokenRef.current) {
+          await wait(SCENE_IMAGE_QUEUE_DELAY_MS);
+        }
+      }
+    } finally {
+      imageQueueProcessingRef.current = false;
+
+      if (imageQueueRef.current.length > 0) {
+        void processImageQueue();
+      }
+    }
+  }, [generateImageFn]);
+
+  const handleGenerateImage = useCallback(
+    (sceneIndex: number, opts?: { force?: boolean }) => {
+      const force = opts?.force ?? false;
+
+      if (!resultRef.current) return;
+      if (!force && sceneImagesRef.current[sceneIndex]?.url) return;
+      if (imageInFlightRef.current[sceneIndex] || imageQueuedRef.current[sceneIndex]) return;
+
+      imageQueuedRef.current[sceneIndex] = true;
+      imageQueueRef.current.push({ sceneIndex, force });
+      setQueuedImageIndexes((prev) => {
+        const next = new Set(prev);
+        next.add(sceneIndex);
         return next;
       });
-    } catch (e) {
-      console.error("[VisionTale] Scene image generation exception:", e);
-    } finally {
-      imageInFlightRef.current[sceneIndex] = false;
-      setGeneratingImageIndex(null);
-    }
-  };
+
+      console.log(
+        "[VisionTale] Scene image queued",
+        JSON.stringify({
+          sceneIndex: sceneIndex + 1,
+          queueLength: imageQueueRef.current.length,
+        }),
+      );
+
+      void processImageQueue();
+    },
+    [processImageQueue],
+  );
 
   const handleGenerateNarration = async (sceneIndex: number) => {
     if (!result) return;
@@ -534,6 +623,7 @@ function HomePage() {
               sceneNarrations={sceneNarrations}
               sceneImages={sceneImages}
               generatingImageIndex={generatingImageIndex}
+              queuedImageIndexes={queuedImageIndexes}
               onGenerateImage={handleGenerateImage}
               onGenerateNarration={handleGenerateNarration}
               generatingNarrationIndex={generatingNarrationIndex}

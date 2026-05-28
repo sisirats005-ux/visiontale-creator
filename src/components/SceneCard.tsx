@@ -14,6 +14,7 @@ interface SceneCardProps {
   imageUrl?: string;
   isPlaceholderImage?: boolean;
   isGeneratingImage?: boolean;
+  isQueuedImage?: boolean;
   onGenerateImage?: (opts?: { force?: boolean }) => void;
   onGenerateNarration?: () => void;
   isGeneratingNarration?: boolean;
@@ -31,6 +32,7 @@ export function SceneCard({
   imageUrl,
   isPlaceholderImage = false,
   isGeneratingImage = false,
+  isQueuedImage = false,
   onGenerateImage,
   onGenerateNarration,
   isGeneratingNarration = false,
@@ -60,9 +62,7 @@ export function SceneCard({
             className="absolute left-4 top-6 w-5 h-5 rounded-full border-2 border-[oklch(0.78_0.18_230/0.5)] bg-background z-10"
             animate={isActive ? glowPulse.animate : {}}
             style={{
-              backgroundColor: isActive
-                ? "oklch(0.78_0.18_230/0.3)"
-                : "oklch(0.22_0.035_260)",
+              backgroundColor: isActive ? "oklch(0.78_0.18_230/0.3)" : "oklch(0.22_0.035_260)",
             }}
           >
             {isActive && isPlaying && (
@@ -129,6 +129,7 @@ export function SceneCard({
               imageUrl={imageUrl}
               isPlaceholder={isPlaceholderImage}
               isGenerating={isGeneratingImage}
+              isQueued={isQueuedImage}
               onGenerate={onGenerateImage}
             />
           </div>
