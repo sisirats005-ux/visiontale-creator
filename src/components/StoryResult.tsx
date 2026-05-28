@@ -19,6 +19,7 @@ interface StoryResultProps {
   sceneNarrations?: NarrationAudio[];
   sceneImages?: Array<{ url: string; model: string; isPlaceholder?: boolean } | null>;
   generatingImageIndex?: number | null;
+  queuedImageIndexes?: Set<number>;
   onGenerateImage?: (sceneIndex: number, opts?: { force?: boolean }) => void;
   onGenerateNarration?: (sceneIndex: number) => void;
   /**
@@ -38,6 +39,7 @@ export function StoryResult({
   sceneNarrations = [],
   sceneImages = [],
   generatingImageIndex = null,
+  queuedImageIndexes = new Set(),
   onGenerateImage,
   onGenerateNarration,
   generatingNarrationIndex = null,
@@ -86,10 +88,7 @@ export function StoryResult({
               Generated Story
             </div>
             {onExportVideo && (
-              <NeonButton
-                onClick={() => setIsExportModalOpen(true)}
-                className="text-xs px-4 py-2"
-              >
+              <NeonButton onClick={() => setIsExportModalOpen(true)} className="text-xs px-4 py-2">
                 <Video className="h-3.5 w-3.5" />
                 Export Video
               </NeonButton>
@@ -99,9 +98,7 @@ export function StoryResult({
             {result.title}
           </h2>
           <p className="text-sm text-muted-foreground italic mb-6">{result.logline}</p>
-          <p className="text-foreground/90 leading-relaxed whitespace-pre-line">
-            {result.story}
-          </p>
+          <p className="text-foreground/90 leading-relaxed whitespace-pre-line">{result.story}</p>
         </GlassCard>
       </motion.div>
 
@@ -127,6 +124,7 @@ export function StoryResult({
               imageUrl={sceneImages[i]?.url}
               isPlaceholderImage={sceneImages[i]?.isPlaceholder}
               isGeneratingImage={generatingImageIndex === i}
+              isQueuedImage={queuedImageIndexes.has(i)}
               onGenerateImage={onGenerateImage ? (opts) => onGenerateImage(i, opts) : undefined}
               onGenerateNarration={onGenerateNarration ? () => onGenerateNarration(i) : undefined}
               isGeneratingNarration={generatingNarrationIndex === i}

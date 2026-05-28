@@ -9,6 +9,7 @@ interface SceneImageProps {
   imageUrl?: string;
   isPlaceholder?: boolean;
   isGenerating?: boolean;
+  isQueued?: boolean;
   onGenerate?: (opts?: { force?: boolean }) => void;
   className?: string;
 }
@@ -23,6 +24,7 @@ export function SceneImage({
   imageUrl,
   isPlaceholder,
   isGenerating,
+  isQueued = false,
   onGenerate,
   className,
 }: SceneImageProps) {
@@ -59,7 +61,7 @@ export function SceneImage({
       }),
     );
     setStatus("error");
-  }, [imageUrl, prompt, seed]);
+  }, [imageUrl, isPlaceholder, prompt, seed]);
 
   const handleRetry = useCallback(() => {
     setStatus("loading");
@@ -106,7 +108,11 @@ export function SceneImage({
                 transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
               />
               <span className="text-xs font-mono text-[oklch(0.78_0.18_230/0.7)] uppercase tracking-wider">
-                {isGenerating ? "Generating image…" : "Loading image…"}
+                {isGenerating
+                  ? "Generating image…"
+                  : isQueued
+                    ? "Queued for image generation…"
+                    : "Loading image…"}
               </span>
             </div>
           </div>
