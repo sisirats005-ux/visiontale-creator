@@ -1,12 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Sparkles, Wand2, AlertCircle, Cpu, Play, Info } from "lucide-react";
 
 import {
   generateStory,
   type StoryResult as StoryResultType,
 } from "@/lib/services/story.functions";
+import { generateSceneImage } from "@/lib/services/image.functions";
 import { generateNarration } from "@/lib/services/narration.functions";
 import { getVideoExportService } from "@/lib/services/videoExport.service";
 import { GlassCard } from "@/components/GlassCard";
@@ -66,47 +67,114 @@ function base64ToAudioBlobUrl(base64Data: string, mimeType = "audio/mpeg"): stri
 function HomePage() {
   const generate = useServerFn(generateStory);
   const generateNarrationFn = useServerFn(generateNarration);
+  const generateImageFn = useServerFn(generateSceneImage);
 
   const [prompt, setPrompt] = useState("");
   const [genre, setGenre] = useState<GenreId>("scifi");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<StoryResultType | null>(null);
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [cooldownMessage, setCooldownMessage] = useState<string | null>(null);
 
   const [characters, setCharacters] = useState<CharacterInput[]>([]);
 
   const [sceneNarrations, setSceneNarrations] = useState<NarrationAudio[]>([]);
+  const [sceneImages, setSceneImages] = useState<
+    Array<{ url: string; model: string; isPlaceholder?: boolean } | null>
+  >([]);
+  const [generatingImageIndex, setGeneratingImageIndex] = useState<number | null>(null);
+  const imageInFlightRef = useRef<Record<number, boolean>>({});
   // Track which scene index is currently generating narration (null = none)
   const [generatingNarrationIndex, setGeneratingNarrationIndex] = useState<number | null>(null);
+  const narrationInFlightRef = useRef<Record<number, boolean>>({});
   const [narrationError, setNarrationError] = useState<string | null>(null);
   const [isCinematicPlayerOpen, setIsCinematicPlayerOpen] = useState(false);
 
+  // Synchronous lock to prevent double-submit races (e.g. rapid double click)
+  const storyInFlightRef = useRef(false);
+  const lastSubmitAtRef = useRef(0);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (prompt.trim().length < 3 || loading) return;
+    const now = Date.now();
+    const trimmed = prompt.trim();
+    if (trimmed.length < 3) return;
+
+    // Cooldown gate (from 429 rate-limit)
+    if (cooldownUntil && now < cooldownUntil) {
+      const secondsLeft = Math.ceil((cooldownUntil - now) / 1000);
+      setError(cooldownMessage ?? `Please wait ${secondsLeft}s before trying again.`);
+      return;
+    }
+
+    // Hard lock: guarantees 1 request at a time even if React state hasn't updated yet
+    if (storyInFlightRef.current) return;
+
+    // Debounce: ignore rapid re-submits within 800ms (double click / enter+click)
+    if (now - lastSubmitAtRef.current < 800) return;
+    lastSubmitAtRef.current = now;
+    storyInFlightRef.current = true;
 
     setLoading(true);
     setError(null);
     setResult(null);
     setSceneNarrations([]);
+    setSceneImages([]);
     setNarrationError(null);
+    setCooldownMessage(null);
 
-    console.log("[VisionTale] Generating story:", prompt.trim().slice(0, 60));
+    const clientRequestId = `ui_story_${now.toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    console.log(
+      "[VisionTale] UI generate click",
+      JSON.stringify({ clientRequestId, promptPreview: trimmed.slice(0, 60), genre, characterCount: characters.length })
+    );
 
     try {
+      const startedAt = Date.now();
       const res = await generate({
         data: {
-          prompt: prompt.trim(),
+          prompt: trimmed,
           genre,
           characters,
         },
       });
 
       if (res.error || !res.result) {
-        console.error("[VisionTale] Story generation error:", res.error);
+        console.error(
+          "[VisionTale] Story generation error",
+          JSON.stringify({
+            clientRequestId,
+            serverRequestId: res.meta?.requestId,
+            error: res.error,
+            elapsedMs: Date.now() - startedAt,
+          })
+        );
+
+        // If rate-limited, enforce a client-side cooldown to stop accidental spam.
+        if (res.error?.toLowerCase().includes("rate limit")) {
+          const retryAfterMs = res.meta?.retryAfterMs ?? 60_000;
+          const until = Date.now() + retryAfterMs;
+          setCooldownUntil(until);
+          setCooldownMessage(
+            `Rate limited. Please wait ${Math.ceil(retryAfterMs / 1000)}s before trying again.`
+          );
+        }
+
         setError(res.error ?? "Failed to generate story.");
       } else {
-        console.log("[VisionTale] Story ready:", res.result.title, `(${res.result.scenes.length} scenes)`);
+        console.log(
+          "[VisionTale] Story ready",
+          JSON.stringify({
+            clientRequestId,
+            serverRequestId: res.meta?.requestId,
+            title: res.result.title,
+            scenes: res.result.scenes.length,
+            elapsedMs: Date.now() - startedAt,
+          })
+        );
         setResult(res.result);
       }
     } catch (err) {
@@ -114,62 +182,155 @@ function HomePage() {
       setError("Network error. Check your connection and try again.");
     } finally {
       setLoading(false);
+      storyInFlightRef.current = false;
+    }
+  };
+
+  const handleGenerateImage = async (sceneIndex: number, opts?: { force?: boolean }) => {
+    if (!result) return;
+    if (!opts?.force && sceneImages[sceneIndex]?.url) return;
+
+    // Enforce exactly ONE in-flight request per scene.
+    if (imageInFlightRef.current[sceneIndex]) return;
+    imageInFlightRef.current[sceneIndex] = true;
+    setGeneratingImageIndex(sceneIndex);
+
+    const scene = result.scenes[sceneIndex];
+    const promptText = scene?.imagePrompt?.trim();
+    if (!promptText) {
+      imageInFlightRef.current[sceneIndex] = false;
+      setGeneratingImageIndex(null);
+      return;
+    }
+
+    console.log(
+      "[VisionTale] Requesting scene image",
+      JSON.stringify({ sceneIndex: sceneIndex + 1, seed: scene.index, promptPreview: promptText.slice(0, 100) }),
+    );
+
+    try {
+      const res = await generateImageFn({
+        data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
+      });
+
+      if (!res.result) {
+        console.error("[VisionTale] Scene image generation error:", res.error);
+        return;
+      }
+
+      const finalUrl = res.result.url;
+      if (!finalUrl) {
+        console.error("[VisionTale] Scene image generation returned empty URL");
+        return;
+      }
+
+      if (res.result.isPlaceholder) {
+        console.warn(
+          "[VisionTale] Scene image placeholder used",
+          JSON.stringify({
+            sceneIndex: sceneIndex + 1,
+            optimizedPrompt: res.result.optimizedPrompt,
+            warning: res.error,
+          }),
+        );
+      } else {
+        console.log(
+          "[VisionTale] Scene image ready",
+          JSON.stringify({
+            sceneIndex: sceneIndex + 1,
+            model: res.result.model,
+            optimizedPromptLength: res.result.optimizedPrompt.length,
+          }),
+        );
+      }
+
+      setSceneImages((prev) => {
+        const next = [...prev];
+        next[sceneIndex] = {
+          url: finalUrl,
+          model: res.result!.model,
+          isPlaceholder: res.result!.isPlaceholder,
+        };
+        return next;
+      });
+    } catch (e) {
+      console.error("[VisionTale] Scene image generation exception:", e);
+    } finally {
+      imageInFlightRef.current[sceneIndex] = false;
+      setGeneratingImageIndex(null);
     }
   };
 
   const handleGenerateNarration = async (sceneIndex: number) => {
-    if (!result || generatingNarrationIndex !== null) return;
+    if (!result) return;
 
-    // Skip if we already have a working URL for this scene
     if (sceneNarrations[sceneIndex]?.url) {
       console.log("[VisionTale] Narration already exists for scene", sceneIndex + 1);
       return;
     }
 
+    if (narrationInFlightRef.current[sceneIndex]) return;
+
     const scene = result.scenes[sceneIndex];
     if (!scene?.narration) return;
 
+    narrationInFlightRef.current[sceneIndex] = true;
     setGeneratingNarrationIndex(sceneIndex);
     setNarrationError(null);
 
-    console.log("[VisionTale] Requesting narration for scene", sceneIndex + 1);
+    console.log(
+      "[VisionTale] Requesting narration (ElevenLabs)",
+      JSON.stringify({ sceneIndex: sceneIndex + 1, textPreview: scene.narration.slice(0, 80) }),
+    );
 
     try {
       const res = await generateNarrationFn({
         data: {
           text: scene.narration,
-          options: { service: "openai" },
+          options: {
+            model: "eleven_multilingual_v2",
+            voiceId: "Rachel",
+          },
         },
       });
 
       if (res.error || !res.result) {
         console.warn("[VisionTale] Narration failed:", res.error);
-        setNarrationError(res.error ?? "Narration generation failed.");
-      } else {
-        const serverResult = res.result;
-        let finalUrl = serverResult.url;
-
-        // FIX: Server returns base64Data (server-safe). Convert to blob URL here (browser-only).
-        if (!finalUrl && serverResult.base64Data) {
-          finalUrl = base64ToAudioBlobUrl(serverResult.base64Data);
-          console.log("[VisionTale] Blob URL created for scene", sceneIndex + 1);
-        }
-
-        if (!finalUrl) {
-          setNarrationError("Narration audio was empty. Please try again.");
-        } else {
-          const audio: NarrationAudio = { ...serverResult, url: finalUrl };
-          setSceneNarrations((prev) => {
-            const updated = [...prev];
-            updated[sceneIndex] = audio;
-            return updated;
-          });
-        }
+        setNarrationError(
+          res.error ?? "Narration generation failed. Cinematic playback will use timed scenes without voice.",
+        );
+        return;
       }
+
+      const serverResult = res.result;
+      let finalUrl = serverResult.url;
+
+      if (!finalUrl && serverResult.base64Data) {
+        finalUrl = base64ToAudioBlobUrl(serverResult.base64Data);
+        console.log(
+          "[VisionTale] Narration blob URL ready",
+          JSON.stringify({ sceneIndex: sceneIndex + 1, durationSec: serverResult.duration }),
+        );
+      }
+
+      if (!finalUrl) {
+        setNarrationError("Narration audio was empty. Please try again.");
+        return;
+      }
+
+      const audio: NarrationAudio = { ...serverResult, url: finalUrl };
+      setSceneNarrations((prev) => {
+        const updated = [...prev];
+        updated[sceneIndex] = audio;
+        return updated;
+      });
     } catch (err) {
       console.error("[VisionTale] Narration exception:", err);
-      setNarrationError("Narration request failed. Check your API key setup.");
+      setNarrationError(
+        "Narration request failed. Check ELEVENLABS_API_KEY. Playback continues without voice.",
+      );
     } finally {
+      narrationInFlightRef.current[sceneIndex] = false;
       setGeneratingNarrationIndex(null);
     }
   };
@@ -290,7 +451,10 @@ function HomePage() {
               <NeonButton
                 type="submit"
                 loading={loading}
-                disabled={prompt.trim().length < 3}
+                disabled={
+                  prompt.trim().length < 3 ||
+                  (cooldownUntil !== null && Date.now() < cooldownUntil)
+                }
               >
                 <Wand2 className="h-4 w-4" />
                 {loading ? "Generating…" : "Generate Story"}
@@ -341,6 +505,9 @@ function HomePage() {
             <StoryResult
               result={result}
               sceneNarrations={sceneNarrations}
+              sceneImages={sceneImages}
+              generatingImageIndex={generatingImageIndex}
+              onGenerateImage={handleGenerateImage}
               onGenerateNarration={handleGenerateNarration}
               generatingNarrationIndex={generatingNarrationIndex}
               onExportVideo={handleExportVideo}
@@ -356,6 +523,14 @@ function HomePage() {
             result.scenes.map((scene, index) => ({
               ...scene,
               narrationAudio: sceneNarrations[index],
+              image: sceneImages[index]
+                ? {
+                    url: sceneImages[index]!.url,
+                    provider: "pollinations",
+                    model: sceneImages[index]!.model,
+                    isPlaceholder: sceneImages[index]!.isPlaceholder,
+                  }
+                : undefined,
             })) as SceneWithNarration[]
           }
           isOpen={isCinematicPlayerOpen}

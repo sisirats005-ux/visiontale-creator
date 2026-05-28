@@ -33,10 +33,7 @@ const DEFAULT_SCENE_DURATION = 6;
 const CROSSFADE_MS = 800;
 
 function getImageUrl(scene: SceneWithNarration): string {
-  const encoded = encodeURIComponent(
-    scene.imagePrompt.trim() || `cinematic scene ${scene.index}`,
-  );
-  return `https://image.pollinations.ai/prompt/${encoded}?width=1920&height=1080&seed=${scene.index}&nologo=true&model=flux`;
+  return scene.image?.url ?? "";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,7 +84,7 @@ function SceneLayer({
       {status !== "error" && (
         <motion.img
           key={kenBurnsKey}
-          src={url}
+          src={url || undefined}
           alt={scene.title}
           fetchPriority="high"
           onLoad={() => setStatus("loaded")}
@@ -153,9 +150,7 @@ function ThumbnailButton({
   onClick: () => void;
 }) {
   const [imgError, setImgError] = useState(false);
-  const thumbUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-    scene.imagePrompt.trim() || `scene ${scene.index}`,
-  )}?width=120&height=68&seed=${scene.index}&nologo=true&model=flux`;
+  const thumbUrl = scene.image?.url ?? "";
 
   return (
     <motion.button
@@ -177,7 +172,7 @@ function ThumbnailButton({
         </div>
       ) : (
         <img
-          src={thumbUrl}
+          src={thumbUrl || undefined}
           alt={scene.title}
           onError={() => setImgError(true)}
           className="w-full h-full object-cover"
@@ -211,6 +206,7 @@ export function CinematicPlayer({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const preloadedAudioRef = useRef<HTMLAudioElement | null>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -224,6 +220,21 @@ export function CinematicPlayer({
     setKenBurnsKey((k) => k + 1);
     setSubtitleKey((k) => k + 1);
   }, [currentIndex]);
+
+  // Preload narration for the active scene before autoplay starts
+  useEffect(() => {
+    if (preloadedAudioRef.current) {
+      preloadedAudioRef.current.pause();
+      preloadedAudioRef.current = null;
+    }
+    const src = currentScene?.narrationAudio?.url;
+    if (!src || src.length === 0) return;
+
+    const preload = new Audio(src);
+    preload.preload = "auto";
+    preload.load();
+    preloadedAudioRef.current = preload;
+  }, [currentIndex, currentScene?.narrationAudio?.url]);
 
   // ── hide controls after inactivity ──────────────────────────────────────
   const resetControlsTimer = useCallback(() => {
@@ -272,11 +283,17 @@ export function CinematicPlayer({
     // FIX: Guard against empty URL — base64→blob conversion can yield "" on failure.
     // An empty src causes a broken audio element with misleading console errors.
     if (currentScene.narrationAudio?.url && currentScene.narrationAudio.url.length > 0) {
-      const audio = new Audio(currentScene.narrationAudio.url);
+      const audio =
+        preloadedAudioRef.current?.src === currentScene.narrationAudio.url
+          ? preloadedAudioRef.current
+          : new Audio(currentScene.narrationAudio.url);
       audio.muted = isMuted;
       audio.volume = 0.9;
+      audio.currentTime = 0;
       audioRef.current = audio;
-      audio.play().catch(console.error);
+      audio.play().catch((e) => {
+        console.warn("[VisionTale] Cinematic narration play failed:", e);
+      });
       duration = currentScene.narrationAudio.duration + 0.5;
     }
 

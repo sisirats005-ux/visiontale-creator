@@ -17,6 +17,9 @@ import { useState } from "react";
 interface StoryResultProps {
   result: StoryResultType;
   sceneNarrations?: NarrationAudio[];
+  sceneImages?: Array<{ url: string; model: string; isPlaceholder?: boolean } | null>;
+  generatingImageIndex?: number | null;
+  onGenerateImage?: (sceneIndex: number, opts?: { force?: boolean }) => void;
   onGenerateNarration?: (sceneIndex: number) => void;
   /**
    * FIX: Changed from boolean `isGeneratingNarration` to `generatingNarrationIndex: number | null`.
@@ -33,6 +36,9 @@ interface StoryResultProps {
 export function StoryResult({
   result,
   sceneNarrations = [],
+  sceneImages = [],
+  generatingImageIndex = null,
+  onGenerateImage,
   onGenerateNarration,
   generatingNarrationIndex = null,
   onExportVideo,
@@ -50,6 +56,14 @@ export function StoryResult({
   const scenesWithNarration: SceneWithNarration[] = result.scenes.map((scene, index) => ({
     ...scene,
     narrationAudio: sceneNarrations[index],
+    image: sceneImages[index]
+      ? {
+          url: sceneImages[index]!.url,
+          provider: "pollinations",
+          model: sceneImages[index]!.model,
+          isPlaceholder: sceneImages[index]!.isPlaceholder,
+        }
+      : undefined,
   })) as SceneWithNarration[];
 
   return (
@@ -110,6 +124,10 @@ export function StoryResult({
               scene={scene}
               delayMs={i * 100}
               narrationAudio={sceneNarrations[i]}
+              imageUrl={sceneImages[i]?.url}
+              isPlaceholderImage={sceneImages[i]?.isPlaceholder}
+              isGeneratingImage={generatingImageIndex === i}
+              onGenerateImage={onGenerateImage ? (opts) => onGenerateImage(i, opts) : undefined}
               onGenerateNarration={onGenerateNarration ? () => onGenerateNarration(i) : undefined}
               isGeneratingNarration={generatingNarrationIndex === i}
             />

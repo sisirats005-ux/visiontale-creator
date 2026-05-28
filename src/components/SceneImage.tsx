@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { ImageOff, RefreshCw } from "lucide-react";
@@ -6,50 +6,66 @@ import { ImageOff, RefreshCw } from "lucide-react";
 interface SceneImageProps {
   prompt: string;
   seed: number;
+  imageUrl?: string;
+  isPlaceholder?: boolean;
+  isGenerating?: boolean;
+  onGenerate?: (opts?: { force?: boolean }) => void;
   className?: string;
 }
 
 /**
- * SceneImage — renders a Pollinations-generated cinematic image for a story scene.
- *
- * BUGS FIXED vs original:
- * 1. Removed `loading="lazy"` — lazy loading deferred images that were already
- *    in the viewport, causing them to silently never fire onLoad in many browsers
- *    right after story generation.
- * 2. Added `key={imageUrl}` logic via a `useEffect` reset — when the parent
- *    re-renders with a new prompt/seed (new story), the status resets to "loading"
- *    so the skeleton and then the image show correctly instead of staying stuck
- *    in a stale "error" or "loading" state from a previous render.
- * 3. Added a manual retry button so users can recover from transient Pollinations
- *    failures without regenerating the whole story.
- * 4. Added `fetchpriority="high"` to the first scene image (seed === 1) so the
- *    browser fetches it immediately rather than queuing it behind other resources.
- * 5. Fallback now shows the image prompt text so the user can see what would have
- *    rendered, keeping the UI informative rather than just showing an error icon.
+ * SceneImage — displays server-generated Pollinations images (data URLs).
+ * Generation is triggered once per scene via onGenerate; no browser prompt URLs.
  */
-export function SceneImage({ prompt, seed, className }: SceneImageProps) {
+export function SceneImage({
+  prompt,
+  seed,
+  imageUrl,
+  isPlaceholder,
+  isGenerating,
+  onGenerate,
+  className,
+}: SceneImageProps) {
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
-  const [retryCount, setRetryCount] = useState(0);
-
-  // Build the Pollinations URL. Append retryCount as a cache-buster on retries.
-  const encodedPrompt = encodeURIComponent(prompt.trim() || "cinematic scene");
-  const cacheBust = retryCount > 0 ? `&_r=${retryCount}` : "";
-  const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=576&seed=${seed}&nologo=true&model=flux${cacheBust}`;
+  const requestedRef = useRef(false);
 
   // BUG FIX #2: Reset status whenever the URL changes (new story generated).
   // Without this, if a previous story's image errored, the same component
   // instance keeps status="error" and never shows the new story's image.
   useEffect(() => {
-    setStatus("loading");
-  }, [imageUrl]);
+    setStatus(imageUrl ? "loading" : "loading");
+    requestedRef.current = false;
+  }, [imageUrl, seed, prompt]);
+
+  // Generate once on mount if needed (exactly one request per scene).
+  useEffect(() => {
+    if (imageUrl) return;
+    if (!onGenerate) return;
+    if (requestedRef.current) return;
+    requestedRef.current = true;
+    onGenerate({ force: false });
+  }, [imageUrl, onGenerate]);
 
   const handleLoad = useCallback(() => setStatus("loaded"), []);
-  const handleError = useCallback(() => setStatus("error"), []);
+  const handleError = useCallback(() => {
+    console.error(
+      "[VisionTale] Scene image failed to load",
+      JSON.stringify({
+        seed,
+        url: imageUrl ?? null,
+        promptLength: prompt.trim().length,
+        provider: "pollinations",
+        isPlaceholder: isPlaceholder ?? false,
+      }),
+    );
+    setStatus("error");
+  }, [imageUrl, prompt, seed]);
 
   const handleRetry = useCallback(() => {
     setStatus("loading");
-    setRetryCount((c) => c + 1);
-  }, []);
+    requestedRef.current = true;
+    onGenerate?.({ force: true });
+  }, [onGenerate]);
 
   return (
     <div
@@ -65,7 +81,7 @@ export function SceneImage({ prompt, seed, className }: SceneImageProps) {
       {/* 16:9 cinematic aspect-ratio container */}
       <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
         {/* Loading shimmer — visible while image is fetching */}
-        {status === "loading" && (
+        {(status === "loading" || isGenerating) && (
           <div className="absolute inset-0 rounded-xl overflow-hidden">
             <div
               className="absolute inset-0"
@@ -90,27 +106,32 @@ export function SceneImage({ prompt, seed, className }: SceneImageProps) {
                 transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
               />
               <span className="text-xs font-mono text-[oklch(0.78_0.18_230/0.7)] uppercase tracking-wider">
-                Generating image…
+                {isGenerating ? "Generating image…" : "Loading image…"}
               </span>
             </div>
           </div>
         )}
 
-        {/* BUG FIX #1: removed loading="lazy" — eager loading ensures images render
-            immediately after story generation without waiting for scroll events.
-            BUG FIX #4: fetchpriority="high" on scene 1 (index 1) for above-fold speed. */}
-        {status !== "error" && (
+        {isPlaceholder && imageUrl && status === "loaded" && (
+          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 rounded-md bg-black/50 border border-amber-500/30">
+            <span className="text-[10px] font-mono text-amber-300/90 uppercase tracking-wider">
+              Placeholder
+            </span>
+          </div>
+        )}
+
+        {status !== "error" && imageUrl && (
           <img
             src={imageUrl}
             alt={prompt}
             onLoad={handleLoad}
             onError={handleError}
-            // REMOVED: loading="lazy"  ← this was the primary bug
             fetchPriority={seed <= 2 ? "high" : "auto"}
             className={cn(
               "absolute inset-0 w-full h-full object-cover rounded-xl",
               "transition-opacity duration-700 ease-out",
               status === "loading" ? "opacity-0" : "opacity-100",
+              isPlaceholder && "opacity-90",
             )}
           />
         )}

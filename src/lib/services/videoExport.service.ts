@@ -211,15 +211,10 @@ export class VideoExportService {
     onProgress?.({ step: "preparing", percentage: 0 });
 
     // 1. Pre-load all images
-    const imageUrls = scenes.map((s) => {
-      const enc = encodeURIComponent(s.imagePrompt.trim() || `scene ${s.index}`);
-      return `https://image.pollinations.ai/prompt/${enc}?width=${W}&height=${H}&seed=${s.index}&nologo=true&model=flux`;
-    });
+    const imageUrls = scenes.map((s) => s.image?.url ?? "");
 
     const images: (HTMLImageElement | null)[] = await Promise.all(
-      imageUrls.map((url) =>
-        loadImage(url).catch(() => null),
-      ),
+      imageUrls.map((url) => (url ? loadImage(url).catch(() => null) : Promise.resolve(null))),
     );
 
     onProgress?.({ step: "generating-audio", percentage: 10 });

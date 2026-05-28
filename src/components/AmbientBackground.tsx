@@ -9,22 +9,36 @@ interface Particle {
   delay: number;
 }
 
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildParticles(count: number, seed: number): Particle[] {
+  const rand = mulberry32(seed);
+  return Array.from({ length: count }, (_, i) => ({
+    id: i,
+    x: rand() * 100,
+    y: rand() * 100,
+    size: rand() * 3 + 1,
+    duration: rand() * 20 + 15,
+    delay: rand() * 5,
+  }));
+}
+
+// Precompute once so SSR + client render identical markup (no hydration mismatch).
+const PARTICLES: Particle[] = buildParticles(20, 0xdecafbad);
+
 /**
  * Ambient Background Effects
  * Lightweight floating particles, animated gradients, and subtle glow overlays
  * Maintains cyberpunk aesthetic while adding cinematic immersion
  */
 export function AmbientBackground() {
-  // Generate random particles
-  const particles: Particle[] = Array.from({ length: 20 }, (_, i) => ({
-    id: i,
-    x: Math.random() * 100,
-    y: Math.random() * 100,
-    size: Math.random() * 3 + 1,
-    duration: Math.random() * 20 + 15,
-    delay: Math.random() * 5,
-  }));
-
   return (
     <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
       {/* Animated gradient overlay */}
@@ -45,7 +59,7 @@ export function AmbientBackground() {
       />
 
       {/* Floating particles */}
-      {particles.map((particle) => (
+      {PARTICLES.map((particle) => (
         <motion.div
           key={particle.id}
           className="absolute rounded-full bg-[oklch(0.78_0.18_230/0.3)] blur-sm"

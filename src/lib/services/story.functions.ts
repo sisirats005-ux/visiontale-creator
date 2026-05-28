@@ -142,17 +142,28 @@ export const generateStory = createServerFn({ method: "POST" })
   .handler(
     async ({
       data,
-    }): Promise<{ result: StoryResult | null; error: string | null }> => {
-      const apiKey = process.env.OPENROUTER_API_KEY;
+    }): Promise<{
+      result: StoryResult | null;
+      error: string | null;
+      meta?: { requestId: string; retryAfterMs?: number };
+    }> => {
+      const rawApiKey = process.env.GROQ_API_KEY;
+      const apiKey = rawApiKey?.trim();
       if (!apiKey) {
-        console.error("[VisionTale] OPENROUTER_API_KEY is not set in environment.");
+        console.error("[VisionTale] GROQ_API_KEY is not set in environment.");
         return {
           result: null,
           error:
-            "AI service is not configured. Add OPENROUTER_API_KEY to your .env.local file.",
+            "AI service is not configured. Add GROQ_API_KEY to your .env.local file.",
         };
       }
 
+      const requestId = `story_${Date.now().toString(36)}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      const requestedModel = process.env.GROQ_MODEL?.trim();
+      const model = requestedModel?.length ? requestedModel : "llama-3.3-70b-versatile";
       const characterBlock = buildCharacterBlock(data.characters);
       const hasCharacters = data.characters.length > 0;
 
@@ -191,23 +202,40 @@ Return JSON with shape:
   ]
 }`;
 
-      console.log("[VisionTale] Generating story for prompt:", data.prompt.slice(0, 60));
+      const startedAt = Date.now();
+      console.log(
+        "[VisionTale] generateStory start",
+        JSON.stringify({
+          requestId,
+          model,
+          requestUrl: "https://api.groq.com/openai/v1/chat/completions",
+          apiKeyLoaded: true,
+          apiKeyLength: apiKey.length,
+          apiKeyHadWhitespace: rawApiKey !== apiKey,
+          requestedModel,
+          promptPreview: data.prompt.slice(0, 60),
+          genre: data.genre,
+          characterCount: data.characters.length,
+        })
+      );
 
       try {
-        const res = await fetch(
-          "https://openrouter.ai/api/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${apiKey}`,
-              "HTTP-Referer": "https://visiontale.app",
-              "X-Title": "VisionTale Creator",
-            },
-            body: JSON.stringify({
-              // FIX: Use a stronger free model that reliably outputs valid JSON.
-              // llama-3.2-3b-instruct:free frequently corrupted JSON output.
-              model: "meta-llama/llama-3.3-70b-instruct:free",
+        const requestUrl = "https://api.groq.com/openai/v1/chat/completions";
+
+        const minimalTest =
+          (process.env.GROQ_MINIMAL_TEST ?? "").trim() === "1" ||
+          (process.env.OPENROUTER_MINIMAL_TEST ?? "").trim() === "1";
+
+        const requestBody = minimalTest
+          ? {
+              model,
+              messages: [{ role: "user", content: "Say OK (exactly) and nothing else." }],
+              temperature: 0,
+              max_tokens: 16,
+            }
+          : {
+              // Story generation payload (normal mode)
+              model,
               messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: userMessage },
@@ -215,37 +243,89 @@ Return JSON with shape:
               response_format: { type: "json_object" },
               temperature: 0.7,
               max_tokens: 2000,
-            }),
-          }
+            };
+
+        const requestHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        };
+
+        const requestBodyJson = JSON.stringify(requestBody);
+
+        // Full outgoing request logging (sanitize secrets, but log structure)
+        const loggedHeaders = {
+          ...requestHeaders,
+          Authorization: `Bearer ${apiKey.slice(0, 6)}…${apiKey.slice(-4)}`,
+        };
+        console.log(
+          "[VisionTale] OpenRouter request",
+          JSON.stringify({
+            requestId,
+            minimalTest,
+            url: requestUrl,
+            headers: loggedHeaders,
+            model,
+            body: requestBody,
+            bodyJsonLength: requestBodyJson.length,
+          })
         );
 
+        const res = await fetch(requestUrl, {
+          method: "POST",
+          headers: requestHeaders,
+          body: requestBodyJson,
+        });
+
         if (res.status === 429) {
+          const retryAfterHeader =
+            res.headers.get("retry-after") ?? res.headers.get("Retry-After");
+          const retryAfterSeconds = retryAfterHeader
+            ? Number.parseFloat(retryAfterHeader)
+            : Number.NaN;
+          const retryAfterMs = Number.isFinite(retryAfterSeconds)
+            ? Math.max(0, Math.round(retryAfterSeconds * 1000))
+            : undefined;
+          console.warn(
+            "[VisionTale] Groq 429",
+            JSON.stringify({
+              requestId,
+              retryAfterHeader,
+              retryAfterMs,
+              elapsedMs: Date.now() - startedAt,
+            })
+          );
           return {
             result: null,
             error:
-              "Rate limit reached — OpenRouter free tier allows ~10 requests/min. Please wait a moment and try again.",
-          };
-        }
-        if (res.status === 402) {
-          return {
-            result: null,
-            error:
-              "OpenRouter credits exhausted. Top up at openrouter.ai/credits, or switch to a free model.",
+              "Rate limit reached — please wait a moment and try again.",
+            meta: { requestId, retryAfterMs },
           };
         }
         if (res.status === 401) {
           return {
             result: null,
             error:
-              "OpenRouter API key is invalid. Check your OPENROUTER_API_KEY in .env.local.",
+              "Groq API key is invalid. Check your GROQ_API_KEY in .env.local.",
+            meta: { requestId },
           };
         }
         if (!res.ok) {
           const text = await res.text().catch(() => "(no body)");
-          console.error("[VisionTale] OpenRouter error:", res.status, text);
+          console.error(
+            "[VisionTale] Groq error",
+            JSON.stringify({
+              requestId,
+              model,
+              requestUrl,
+              status: res.status,
+              elapsedMs: Date.now() - startedAt,
+              body: text,
+            })
+          );
           return {
             result: null,
             error: `AI service returned an error (HTTP ${res.status}). Check the console for details.`,
+            meta: { requestId },
           };
         }
 
@@ -254,19 +334,46 @@ Return JSON with shape:
           error?: { message?: string };
         };
 
-        // OpenRouter sometimes wraps errors in a 200 response
+        // Some providers wrap errors in a 200 response
         if (json.error) {
-          console.error("[VisionTale] OpenRouter API error in response:", json.error);
-          return { result: null, error: json.error.message ?? "AI service error." };
+          console.error("[VisionTale] Groq API error in response:", json.error);
+          return {
+            result: null,
+            error: json.error.message ?? "AI service error.",
+            meta: { requestId },
+          };
         }
 
         const content = json.choices?.[0]?.message?.content ?? "";
         if (!content) {
           console.error("[VisionTale] Empty content from OpenRouter:", JSON.stringify(json));
-          return { result: null, error: "AI returned an empty response. Please try again." };
+          return {
+            result: null,
+            error: "AI returned an empty response. Please try again.",
+            meta: { requestId },
+          };
         }
 
-        console.log("[VisionTale] Raw AI response length:", content.length);
+        if (minimalTest) {
+          console.log(
+            "[VisionTale] Groq minimalTest response",
+            JSON.stringify({ requestId, model, content, elapsedMs: Date.now() - startedAt })
+          );
+          return {
+            result: null,
+            error: null,
+            meta: { requestId },
+          };
+        }
+
+        console.log(
+          "[VisionTale] generateStory response received",
+          JSON.stringify({
+            requestId,
+            contentLength: content.length,
+            elapsedMs: Date.now() - startedAt,
+          })
+        );
 
         let parsed: unknown;
         try {
@@ -277,6 +384,7 @@ Return JSON with shape:
             result: null,
             error:
               "AI returned an unreadable response. This sometimes happens with free models — please try again.",
+            meta: { requestId },
           };
         }
 
@@ -303,24 +411,26 @@ Return JSON with shape:
             const recovery = StorySchema.safeParse({ ...raw, scenes: patchedScenes });
             if (recovery.success) {
               console.log("[VisionTale] Recovered story via partial patch.");
-              return { result: recovery.data, error: null };
+              return { result: recovery.data, error: null, meta: { requestId } };
             }
           }
           return {
             result: null,
             error:
               "AI response was in an unexpected format. Please try again — free models occasionally produce partial output.",
+            meta: { requestId },
           };
         }
 
         console.log("[VisionTale] Story generated successfully:", validated.data.title);
-        return { result: validated.data, error: null };
+        return { result: validated.data, error: null, meta: { requestId } };
       } catch (err) {
         console.error("[VisionTale] generateStory network/fetch error:", err);
         return {
           result: null,
           error:
             "Network error while contacting the AI service. Check your internet connection and try again.",
+          meta: { requestId },
         };
       }
     }

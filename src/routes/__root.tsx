@@ -92,6 +92,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       // Preconnect to external hosts used at runtime
       { rel: "preconnect", href: "https://openrouter.ai" },
       { rel: "preconnect", href: "https://image.pollinations.ai" },
+      { rel: "preconnect", href: "https://api.elevenlabs.io" },
     ],
   }),
   shellComponent: RootShell,

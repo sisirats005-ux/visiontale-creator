@@ -11,6 +11,10 @@ interface SceneCardProps {
   scene: Scene;
   delayMs?: number;
   narrationAudio?: NarrationAudio;
+  imageUrl?: string;
+  isPlaceholderImage?: boolean;
+  isGeneratingImage?: boolean;
+  onGenerateImage?: (opts?: { force?: boolean }) => void;
   onGenerateNarration?: () => void;
   isGeneratingNarration?: boolean;
   isActive?: boolean;
@@ -24,6 +28,10 @@ export function SceneCard({
   scene,
   delayMs = 0,
   narrationAudio,
+  imageUrl,
+  isPlaceholderImage = false,
+  isGeneratingImage = false,
+  onGenerateImage,
   onGenerateNarration,
   isGeneratingNarration = false,
   isActive = false,
@@ -118,6 +126,10 @@ export function SceneCard({
               key={`${scene.index}-${scene.imagePrompt.slice(0, 40)}`}
               prompt={scene.imagePrompt || `Cinematic scene ${scene.index}: ${scene.title}`}
               seed={scene.index}
+              imageUrl={imageUrl}
+              isPlaceholder={isPlaceholderImage}
+              isGenerating={isGeneratingImage}
+              onGenerate={onGenerateImage}
             />
           </div>
 

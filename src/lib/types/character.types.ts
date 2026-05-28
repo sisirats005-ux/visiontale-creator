@@ -50,7 +50,7 @@ export interface CinematicScene {
  * Narration and Video Export Types
  */
 
-export type TTSService = "elevenlabs" | "openai" | "playht";
+export type TTSService = "elevenlabs";
 
 /**
  * NarrationAudio — the URL is a blob: URL created on the CLIENT side.
@@ -65,12 +65,22 @@ export interface NarrationAudio {
   service: TTSService;
 }
 
+export interface GeneratedImage {
+  /**
+   * Browser-loadable data URL (generated server-side from Pollinations or SVG placeholder).
+   */
+  url: string;
+  provider: "pollinations";
+  model: string;
+  isPlaceholder?: boolean;
+}
+
 export interface SceneWithNarration extends CinematicScene {
   narrationAudio?: NarrationAudio;
+  image?: GeneratedImage;
 }
 
 export interface NarrationGenerationOptions {
-  service: TTSService;
   voiceId?: string;
   model?: string;
 }

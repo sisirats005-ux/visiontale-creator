@@ -72,7 +72,7 @@ export function NarrationPlayer({
     <div className="space-y-2">
       {/* Hidden audio element — only render when we have a valid URL */}
       {narrationAudio && narrationAudio.url && narrationAudio.url.length > 0 && (
-        <audio ref={audioRef} src={narrationAudio.url} preload="metadata" />
+        <audio ref={audioRef} src={narrationAudio.url} preload="auto" />
       )}
 
       {/* Generate button or player */}
@@ -143,7 +143,7 @@ export function NarrationPlayer({
 
           {/* Duration display */}
           <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
-            <span>{narrationAudio.service.toUpperCase()}</span>
+            <span>ELEVENLABS</span>
             <span>{Math.round(narrationAudio.duration)}s</span>
           </div>
         </div>
