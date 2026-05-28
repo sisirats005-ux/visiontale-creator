@@ -1,12 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Sparkles, Wand2, AlertCircle, Cpu, Play, Info } from "lucide-react";
 
-import {
-  generateStory,
-  type StoryResult as StoryResultType,
-} from "@/lib/services/story.functions";
+import { generateStory, type StoryResult as StoryResultType } from "@/lib/services/story.functions";
 import { generateSceneImage } from "@/lib/services/image.functions";
 import { generateNarration } from "@/lib/services/narration.functions";
 import { getVideoExportService } from "@/lib/services/videoExport.service";
@@ -34,8 +31,7 @@ export const Route = createFileRoute("/")({
       { title: "Neuralcast — AI Story Video Generator" },
       {
         name: "description",
-        content:
-          "Generate cinematic short stories with scene-by-scene breakdowns using AI.",
+        content: "Generate cinematic short stories with scene-by-scene breakdowns using AI.",
       },
     ],
   }),
@@ -88,12 +84,39 @@ function HomePage() {
   // Track which scene index is currently generating narration (null = none)
   const [generatingNarrationIndex, setGeneratingNarrationIndex] = useState<number | null>(null);
   const narrationInFlightRef = useRef<Record<number, boolean>>({});
+  const audioBlobUrlsRef = useRef<Set<string>>(new Set());
   const [narrationError, setNarrationError] = useState<string | null>(null);
   const [isCinematicPlayerOpen, setIsCinematicPlayerOpen] = useState(false);
 
   // Synchronous lock to prevent double-submit races (e.g. rapid double click)
   const storyInFlightRef = useRef(false);
   const lastSubmitAtRef = useRef(0);
+
+  const revokeNarrationBlobUrls = useCallback(() => {
+    audioBlobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    audioBlobUrlsRef.current.clear();
+  }, []);
+
+  useEffect(() => () => revokeNarrationBlobUrls(), [revokeNarrationBlobUrls]);
+
+  const cinematicScenes = useMemo(
+    () =>
+      result
+        ? (result.scenes.map((scene, index) => ({
+            ...scene,
+            narrationAudio: sceneNarrations[index],
+            image: sceneImages[index]
+              ? {
+                  url: sceneImages[index]!.url,
+                  provider: "pollinations" as const,
+                  model: sceneImages[index]!.model,
+                  isPlaceholder: sceneImages[index]!.isPlaceholder,
+                }
+              : undefined,
+          })) as SceneWithNarration[])
+        : [],
+    [result, sceneImages, sceneNarrations],
+  );
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -119,6 +142,7 @@ function HomePage() {
     setLoading(true);
     setError(null);
     setResult(null);
+    revokeNarrationBlobUrls();
     setSceneNarrations([]);
     setSceneImages([]);
     setNarrationError(null);
@@ -129,7 +153,12 @@ function HomePage() {
       .slice(2, 8)}`;
     console.log(
       "[VisionTale] UI generate click",
-      JSON.stringify({ clientRequestId, promptPreview: trimmed.slice(0, 60), genre, characterCount: characters.length })
+      JSON.stringify({
+        clientRequestId,
+        promptPreview: trimmed.slice(0, 60),
+        genre,
+        characterCount: characters.length,
+      }),
     );
 
     try {
@@ -150,7 +179,7 @@ function HomePage() {
             serverRequestId: res.meta?.requestId,
             error: res.error,
             elapsedMs: Date.now() - startedAt,
-          })
+          }),
         );
 
         // If rate-limited, enforce a client-side cooldown to stop accidental spam.
@@ -159,7 +188,7 @@ function HomePage() {
           const until = Date.now() + retryAfterMs;
           setCooldownUntil(until);
           setCooldownMessage(
-            `Rate limited. Please wait ${Math.ceil(retryAfterMs / 1000)}s before trying again.`
+            `Rate limited. Please wait ${Math.ceil(retryAfterMs / 1000)}s before trying again.`,
           );
         }
 
@@ -173,7 +202,7 @@ function HomePage() {
             title: res.result.title,
             scenes: res.result.scenes.length,
             elapsedMs: Date.now() - startedAt,
-          })
+          }),
         );
         setResult(res.result);
       }
@@ -205,7 +234,11 @@ function HomePage() {
 
     console.log(
       "[VisionTale] Requesting scene image",
-      JSON.stringify({ sceneIndex: sceneIndex + 1, seed: scene.index, promptPreview: promptText.slice(0, 100) }),
+      JSON.stringify({
+        sceneIndex: sceneIndex + 1,
+        seed: scene.index,
+        promptPreview: promptText.slice(0, 100),
+      }),
     );
 
     try {
@@ -297,7 +330,8 @@ function HomePage() {
       if (res.error || !res.result) {
         console.warn("[VisionTale] Narration failed:", res.error);
         setNarrationError(
-          res.error ?? "Narration generation failed. Cinematic playback will use timed scenes without voice.",
+          res.error ??
+            "Narration generation failed. Cinematic playback will use timed scenes without voice.",
         );
         return;
       }
@@ -307,6 +341,7 @@ function HomePage() {
 
       if (!finalUrl && serverResult.base64Data) {
         finalUrl = base64ToAudioBlobUrl(serverResult.base64Data);
+        if (finalUrl) audioBlobUrlsRef.current.add(finalUrl);
         console.log(
           "[VisionTale] Narration blob URL ready",
           JSON.stringify({ sceneIndex: sceneIndex + 1, durationSec: serverResult.duration }),
@@ -342,11 +377,7 @@ function HomePage() {
     if (!result) throw new Error("No story to export");
 
     const videoExportService = getVideoExportService();
-    const scenesWithNarration: SceneWithNarration[] = result.scenes.map(
-      (scene, index) => ({ ...scene, narrationAudio: sceneNarrations[index] }),
-    ) as SceneWithNarration[];
-
-    return videoExportService.exportVideo(scenesWithNarration, options, onProgress);
+    return videoExportService.exportVideo(cinematicScenes, options, onProgress);
   };
 
   const handleOpenCinematicPlayer = () => {
@@ -394,8 +425,8 @@ function HomePage() {
             <span className="text-gradient">cinematic story</span>
           </h2>
           <p className="mt-5 text-base sm:text-lg text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-            Describe a concept, pick a genre, and watch AI craft a complete short
-            story with a scene-by-scene visual breakdown.
+            Describe a concept, pick a genre, and watch AI craft a complete short story with a
+            scene-by-scene visual breakdown.
           </p>
         </section>
 
@@ -452,8 +483,7 @@ function HomePage() {
                 type="submit"
                 loading={loading}
                 disabled={
-                  prompt.trim().length < 3 ||
-                  (cooldownUntil !== null && Date.now() < cooldownUntil)
+                  prompt.trim().length < 3 || (cooldownUntil !== null && Date.now() < cooldownUntil)
                 }
               >
                 <Wand2 className="h-4 w-4" />
@@ -494,10 +524,7 @@ function HomePage() {
           <div className="mt-10">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-foreground">Generated Story</h3>
-              <NeonButton
-                onClick={handleOpenCinematicPlayer}
-                className="text-xs px-4 py-2"
-              >
+              <NeonButton onClick={handleOpenCinematicPlayer} className="text-xs px-4 py-2">
                 <Play className="h-3.5 w-3.5" />
                 Cinematic Playback
               </NeonButton>
@@ -519,20 +546,7 @@ function HomePage() {
       {/* Cinematic Player */}
       {result && (
         <CinematicPlayer
-          scenes={
-            result.scenes.map((scene, index) => ({
-              ...scene,
-              narrationAudio: sceneNarrations[index],
-              image: sceneImages[index]
-                ? {
-                    url: sceneImages[index]!.url,
-                    provider: "pollinations",
-                    model: sceneImages[index]!.model,
-                    isPlaceholder: sceneImages[index]!.isPlaceholder,
-                  }
-                : undefined,
-            })) as SceneWithNarration[]
-          }
+          scenes={cinematicScenes}
           isOpen={isCinematicPlayerOpen}
           onClose={() => setIsCinematicPlayerOpen(false)}
         />

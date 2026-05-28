@@ -1,9 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-} from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -48,15 +43,14 @@ function SceneLayer({
   visible: boolean;
   kenBurnsKey: number;
 }) {
-  const [status, setStatus] = useState<"loading" | "loaded" | "error">(
-    "loading",
-  );
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
   const url = getImageUrl(scene);
 
-  // Reset on scene change
+  // Reset on scene/image change. Scenes without an image should show the fallback
+  // immediately instead of leaving the player in an infinite loading shimmer.
   useEffect(() => {
-    setStatus("loading");
-  }, [scene.index]);
+    setStatus(url ? "loading" : "error");
+  }, [scene.index, url]);
 
   return (
     <motion.div
@@ -164,7 +158,7 @@ function ThumbnailButton({
           : "border-white/20 opacity-60 hover:opacity-100"
       }`}
     >
-      {imgError ? (
+      {imgError || !thumbUrl ? (
         <div className="w-full h-full bg-[oklch(0.18_0.03_260)] flex items-center justify-center">
           <span className="text-[8px] font-mono text-[oklch(0.78_0.18_230/0.6)]">
             {String(index + 1).padStart(2, "0")}
@@ -188,11 +182,7 @@ function ThumbnailButton({
 // ─────────────────────────────────────────────────────────────────────────────
 // Main CinematicPlayer
 // ─────────────────────────────────────────────────────────────────────────────
-export function CinematicPlayer({
-  scenes,
-  isOpen,
-  onClose,
-}: CinematicPlayerProps) {
+export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -207,12 +197,16 @@ export function CinematicPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const preloadedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const isMutedRef = useRef(isMuted);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const currentScene = scenes[currentIndex];
-  const sceneDuration = currentScene?.narrationAudio?.duration ?? DEFAULT_SCENE_DURATION;
+  const sceneDuration = Math.max(
+    0.1,
+    currentScene?.narrationAudio?.duration ?? DEFAULT_SCENE_DURATION,
+  );
 
   // ── reset state when scene changes ──────────────────────────────────────
   useEffect(() => {
@@ -228,13 +222,20 @@ export function CinematicPlayer({
       preloadedAudioRef.current = null;
     }
     const src = currentScene?.narrationAudio?.url;
-    if (!src || src.length === 0) return;
+    if (!isOpen || !src || src.length === 0) return;
 
     const preload = new Audio(src);
     preload.preload = "auto";
     preload.load();
     preloadedAudioRef.current = preload;
-  }, [currentIndex, currentScene?.narrationAudio?.url]);
+
+    return () => {
+      preload.pause();
+      if (preloadedAudioRef.current === preload) {
+        preloadedAudioRef.current = null;
+      }
+    };
+  }, [isOpen, currentIndex, currentScene?.narrationAudio?.url]);
 
   // ── hide controls after inactivity ──────────────────────────────────────
   const resetControlsTimer = useCallback(() => {
@@ -276,7 +277,7 @@ export function CinematicPlayer({
       audioRef.current = null;
     }
 
-    if (!isPlaying || !currentScene) return;
+    if (!isOpen || !isPlaying || !currentScene) return;
 
     let duration = DEFAULT_SCENE_DURATION;
 
@@ -287,14 +288,14 @@ export function CinematicPlayer({
         preloadedAudioRef.current?.src === currentScene.narrationAudio.url
           ? preloadedAudioRef.current
           : new Audio(currentScene.narrationAudio.url);
-      audio.muted = isMuted;
+      audio.muted = isMutedRef.current;
       audio.volume = 0.9;
       audio.currentTime = 0;
       audioRef.current = audio;
-      audio.play().catch((e) => {
+      void audio.play().catch((e) => {
         console.warn("[VisionTale] Cinematic narration play failed:", e);
       });
-      duration = currentScene.narrationAudio.duration + 0.5;
+      duration = Math.max(DEFAULT_SCENE_DURATION, currentScene.narrationAudio.duration + 0.5);
     }
 
     // Elapsed ticker
@@ -317,10 +318,19 @@ export function CinematicPlayer({
         audioRef.current = null;
       }
     };
-  }, [isPlaying, currentIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [
+    advanceScene,
+    currentIndex,
+    currentScene,
+    currentScene?.narrationAudio?.duration,
+    currentScene?.narrationAudio?.url,
+    isOpen,
+    isPlaying,
+  ]);
 
-  // mute/unmute without restarting
+  // mute/unmute without restarting the active narration track
   useEffect(() => {
+    isMutedRef.current = isMuted;
     if (audioRef.current) audioRef.current.muted = isMuted;
   }, [isMuted]);
 
@@ -354,6 +364,11 @@ export function CinematicPlayer({
   }, []);
 
   // ── navigate ─────────────────────────────────────────────────────────────
+  const handleClose = () => {
+    setIsPlaying(false);
+    onClose();
+  };
+
   const handlePrev = () => {
     if (currentIndex > 0) {
       setIsOutro(false);
@@ -373,8 +388,12 @@ export function CinematicPlayer({
 
   if (!isOpen || !currentScene) return null;
 
-  const progressPercent = (elapsed / sceneDuration) * 100;
-  const overallPercent = ((currentIndex + elapsed / sceneDuration) / scenes.length) * 100;
+  const clampedSceneRatio = Math.max(0, Math.min(1, elapsed / sceneDuration));
+  const progressPercent = clampedSceneRatio * 100;
+  const overallPercent = Math.max(
+    0,
+    Math.min(100, ((currentIndex + clampedSceneRatio) / scenes.length) * 100),
+  );
 
   return (
     <AnimatePresence>
@@ -386,12 +405,9 @@ export function CinematicPlayer({
         exit={{ opacity: 0 }}
         transition={{ duration: 0.5 }}
         className="fixed inset-0 z-50 bg-black overflow-hidden"
-        onClick={onClose}
+        onClick={handleClose}
       >
-        <div
-          className="relative w-full h-full"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="relative w-full h-full" onClick={(e) => e.stopPropagation()}>
           {/* ── Scene layers with crossfade ── */}
           {scenes.map((scene, idx) => (
             <SceneLayer
@@ -480,13 +496,15 @@ export function CinematicPlayer({
             style={{ textShadow: "0 0 20px oklch(0.85_0.15_220/0.8)" }}
           >
             {String(currentScene.index).padStart(2, "0")}
-            <span className="text-sm text-white/40 ml-1">/ {String(scenes.length).padStart(2, "0")}</span>
+            <span className="text-sm text-white/40 ml-1">
+              / {String(scenes.length).padStart(2, "0")}
+            </span>
           </motion.div>
 
           {/* ── Close button ── */}
           <motion.button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             animate={{ opacity: showControls ? 1 : 0 }}
             transition={{ duration: 0.3 }}
             whileHover={{ scale: 1.1 }}
@@ -622,11 +640,7 @@ export function CinematicPlayer({
               whileTap={{ scale: 0.9 }}
               className="p-2.5 rounded-full bg-black/50 border border-white/20 text-white/80 hover:text-white hover:bg-black/70 transition-all"
             >
-              {isMuted ? (
-                <VolumeX className="h-4 w-4" />
-              ) : (
-                <Volume2 className="h-4 w-4" />
-              )}
+              {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
             </motion.button>
 
             {/* Fullscreen */}
@@ -637,11 +651,7 @@ export function CinematicPlayer({
               whileTap={{ scale: 0.9 }}
               className="p-2.5 rounded-full bg-black/50 border border-white/20 text-white/80 hover:text-white hover:bg-black/70 transition-all"
             >
-              {isFullscreen ? (
-                <Minimize2 className="h-4 w-4" />
-              ) : (
-                <Maximize2 className="h-4 w-4" />
-              )}
+              {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </motion.button>
           </motion.div>
 
