@@ -9,10 +9,10 @@ interface NarrationPlayerProps {
   isGenerating?: boolean;
 }
 
-export function NarrationPlayer({ 
-  narrationAudio, 
-  onGenerate, 
-  isGenerating = false 
+export function NarrationPlayer({
+  narrationAudio,
+  onGenerate,
+  isGenerating = false,
 }: NarrationPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -33,25 +33,38 @@ export function NarrationPlayer({
       setProgress(0);
     };
 
+    const handlePause = () => {
+      setIsPlaying(false);
+    };
+
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("pause", handlePause);
 
     return () => {
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("pause", handlePause);
     };
   }, [narrationAudio]);
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio || !narrationAudio) return;
 
     if (isPlaying) {
       audio.pause();
-    } else {
-      audio.play();
+      setIsPlaying(false);
+      return;
     }
-    setIsPlaying(!isPlaying);
+
+    try {
+      await audio.play();
+      setIsPlaying(true);
+    } catch (err) {
+      console.warn("[VisionTale] Narration playback failed:", err);
+      setIsPlaying(false);
+    }
   };
 
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -60,9 +73,20 @@ export function NarrationPlayer({
 
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
-    const percentage = clickX / rect.width;
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+
+    const percentage = Math.max(0, Math.min(1, clickX / rect.width));
     audio.currentTime = percentage * audio.duration;
   };
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    setIsPlaying(false);
+    setProgress(0);
+    return () => {
+      audio?.pause();
+    };
+  }, [narrationAudio?.url]);
 
   if (!narrationAudio && !onGenerate) {
     return null;

@@ -45,6 +45,10 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function loadAudio(url: string): Promise<AudioBuffer> {
   // FIX: Guard against empty or invalid URLs — blob URL conversion can yield ""
   if (!url || url.length === 0) {
@@ -110,10 +114,7 @@ function drawImageCover(
 }
 
 function addVignette(ctx: CanvasRenderingContext2D, w: number, h: number) {
-  const grad = ctx.createRadialGradient(
-    w / 2, h / 2, 0,
-    w / 2, h / 2, Math.max(w, h) / 1.5,
-  );
+  const grad = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) / 1.5);
   grad.addColorStop(0, "rgba(0,0,0,0)");
   grad.addColorStop(1, "rgba(0,0,0,0.45)");
   ctx.fillStyle = grad;
@@ -262,11 +263,10 @@ export class VideoExportService {
     }
 
     // Check supported MIME types
-    const mimeType = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm",
-    ].find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm";
+    const mimeType =
+      ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((m) =>
+        MediaRecorder.isTypeSupported(m),
+      ) ?? "video/webm";
 
     // FIX: Check captureStream availability (not in all Safari versions)
     if (typeof canvas.captureStream !== "function") {
@@ -277,43 +277,55 @@ export class VideoExportService {
 
     const stream = canvas.captureStream(fps);
 
-    // Merge audio via AudioContext → MediaStreamTrack
-    let audioDestTrack: MediaStreamTrack | undefined;
+    // Merge audio via AudioContext → MediaStreamTrack. Keep the context and
+    // source nodes alive until recording finishes, otherwise some browsers can
+    // garbage-collect or stop the mixed narration track mid-export.
+    let audioCtx: AudioContext | null = null;
+    const audioSources: AudioBufferSourceNode[] = [];
     if (audioBufs.some(Boolean)) {
       try {
-        const audioCtx = new AudioContext();
+        audioCtx = new AudioContext();
         const dest = audioCtx.createMediaStreamDestination();
 
         let offset = 0;
         scenes.forEach((_, i) => {
           const buf = audioBufs[i];
-          if (buf) {
+          if (buf && audioCtx) {
             const src = audioCtx.createBufferSource();
             src.buffer = buf;
             src.connect(dest);
-            src.start(offset);
+            src.start(audioCtx.currentTime + offset);
+            audioSources.push(src);
           }
           offset += durations[i];
         });
 
-        audioDestTrack = dest.stream.getAudioTracks()[0];
+        const audioDestTrack = dest.stream.getAudioTracks()[0];
         if (audioDestTrack) stream.addTrack(audioDestTrack);
       } catch (e) {
         // audio merge failed gracefully — continue without audio
         console.warn("Audio merge failed:", e);
+        audioCtx?.close().catch(() => {});
+        audioCtx = null;
       }
     }
 
     const chunks: Blob[] = [];
     const recorder = new MediaRecorder(stream, {
       mimeType,
-      videoBitsPerSecond: options.quality === "high" ? 5_000_000 : options.quality === "medium" ? 2_500_000 : 1_000_000,
+      videoBitsPerSecond:
+        options.quality === "high"
+          ? 5_000_000
+          : options.quality === "medium"
+            ? 2_500_000
+            : 1_000_000,
     });
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
 
-    const recordingDone = new Promise<Blob>((resolve) => {
+    const recordingDone = new Promise<Blob>((resolve, reject) => {
+      recorder.onerror = () => reject(recorder.error ?? new Error("Video recording failed."));
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: mimeType });
         resolve(blob);
@@ -324,7 +336,8 @@ export class VideoExportService {
 
     // 5. Render loop — draw frames synchronously at target fps
     let globalFramesDone = 0;
-    const totalFrames = Math.round(totalDuration * fps);
+    const totalFrames = Math.max(1, Math.round(totalDuration * fps));
+    const frameDurationMs = 1000 / fps;
 
     for (let si = 0; si < scenes.length; si++) {
       const sceneFrames = Math.round(durations[si] * fps);
@@ -344,8 +357,7 @@ export class VideoExportService {
         addVignette(ctx, W, H);
 
         // Subtitle fade: in during first 10% of scene, out during last 10%
-        const subtitleAlpha =
-          t < 0.1 ? t / 0.1 : t > 0.9 ? (1 - t) / 0.1 : 1;
+        const subtitleAlpha = t < 0.1 ? t / 0.1 : t > 0.9 ? (1 - t) / 0.1 : 1;
         addSubtitle(ctx, W, H, scenes[si].title, scenes[si].narration, subtitleAlpha);
 
         // Crossfade in/out using transitionFrames
@@ -357,10 +369,19 @@ export class VideoExportService {
 
         globalFramesDone++;
 
-        // Yield to browser every 15 frames to avoid UI hang
-        if (f % 15 === 0) {
-          await new Promise<void>((res) => setTimeout(res, 0));
+        if (globalFramesDone % Math.max(1, Math.round(fps / 2)) === 0) {
+          onProgress?.({
+            step: "rendering-scenes",
+            percentage: 20 + (globalFramesDone / totalFrames) * 55,
+            currentScene: si + 1,
+            totalScenes: scenes.length,
+          });
         }
+
+        // MediaRecorder records elapsed wall-clock time from captureStream(), not
+        // the number of canvas draws. Pace frames to the requested FPS so exports
+        // have the expected duration instead of a near-instant clip.
+        await wait(frameDurationMs);
       }
 
       onProgress?.({
@@ -375,9 +396,23 @@ export class VideoExportService {
 
     // 6. Stop recorder and wait for blob
     recorder.stop();
-    stream.getTracks().forEach((t) => t.stop());
 
     const videoBlob = await recordingDone;
+    stream.getTracks().forEach((t) => t.stop());
+    audioSources.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // Source may already have ended naturally.
+      }
+    });
+    await audioCtx?.close().catch(() => undefined);
+
+    if (videoBlob.size === 0) {
+      throw new Error(
+        "Video export produced an empty file. Please try again with a lower quality setting.",
+      );
+    }
 
     onProgress?.({ step: "finalizing", percentage: 95 });
 
@@ -393,10 +428,7 @@ export class VideoExportService {
     };
   }
 
-  estimateFileSize(
-    duration: number,
-    quality: VideoExportOptions["quality"],
-  ): number {
+  estimateFileSize(duration: number, quality: VideoExportOptions["quality"]): number {
     const bitrateMap = { low: 1_000_000, medium: 2_500_000, high: 5_000_000 };
     return Math.round((bitrateMap[quality] * duration) / 8);
   }
