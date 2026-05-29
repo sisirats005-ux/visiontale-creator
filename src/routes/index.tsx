@@ -32,7 +32,7 @@ import type {
 type SceneImageState = { url: string; model: string; isPlaceholder?: boolean } | null;
 type ImageQueueItem = { sceneIndex: number; force: boolean };
 
-const SCENE_IMAGE_QUEUE_DELAY_MS = 1_500;
+const SCENE_IMAGE_QUEUE_DELAY_MS = 3_000;
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -101,6 +101,7 @@ function HomePage() {
   const imageQueueProcessingRef = useRef(false);
   const imageQueueTokenRef = useRef(0);
   const activeImageRequestInFlightRef = useRef(false);
+  const processImageQueueRef = useRef<(() => void) | null>(null);
   const resultRef = useRef<StoryResultType | null>(null);
   const sceneImagesRef = useRef<SceneImageState[]>([]);
   // Track which scene index is currently generating narration (null = none)
@@ -300,6 +301,8 @@ function HomePage() {
         activeImageRequestInFlightRef.current = true;
         setGeneratingImageIndex(sceneIndex);
 
+        let success = false;
+
         console.log(
           "[VisionTale] Requesting queued scene image",
           JSON.stringify({
@@ -346,6 +349,7 @@ function HomePage() {
                 optimizedPromptLength: res.result.optimizedPrompt.length,
               }),
             );
+            success = true;
           }
 
           setSceneImages((prev) => {
@@ -367,17 +371,20 @@ function HomePage() {
         }
 
         if (imageQueueRef.current.length > 0 && queueToken === globalQueueToken) {
-          await wait(SCENE_IMAGE_QUEUE_DELAY_MS);
+          const delay = success ? SCENE_IMAGE_QUEUE_DELAY_MS : SCENE_IMAGE_QUEUE_DELAY_MS + 1000;
+          await wait(delay);
         }
       }
     } finally {
       imageQueueProcessingRef.current = false;
 
       if (imageQueueRef.current.length > 0 && queueToken === globalQueueToken) {
-        void processImageQueue();
+        processImageQueueRef.current?.();
       }
     }
   }, [generateImageFn]);
+
+  processImageQueueRef.current = processImageQueue;
 
   const handleGenerateImage = useCallback(
     (sceneIndex: number, opts?: { force?: boolean }) => {

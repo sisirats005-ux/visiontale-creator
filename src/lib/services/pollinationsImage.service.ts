@@ -72,6 +72,7 @@ async function fetchWithTimeout(
       headers: {
         Accept: "image/*",
         "User-Agent": "VisionTale-Creator/1.0 (demo)",
+        Connection: "close",
       },
     });
 
