@@ -21,6 +21,7 @@ export type GeneratedImageResult = {
   provider: "pollinations";
   isPlaceholder: boolean;
   optimizedPrompt: string;
+  errorDetails?: string;
 };
 
 /**
@@ -65,9 +66,10 @@ export const generateSceneImage = createServerFn({ method: "POST" })
           provider: "pollinations",
           isPlaceholder: generated.isPlaceholder,
           optimizedPrompt: generated.optimizedPrompt,
+          errorDetails: generated.errorDetails,
         },
         error: generated.isPlaceholder
-          ? "Image provider unavailable — placeholder used."
+          ? generated.errorDetails || "Image provider unavailable — placeholder used."
           : null,
       };
     } catch (err) {

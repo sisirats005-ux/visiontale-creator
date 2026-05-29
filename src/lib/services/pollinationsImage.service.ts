@@ -27,6 +27,7 @@ export type PollinationsGenerateResult = {
   isPlaceholder: boolean;
   optimizedPrompt: string;
   requestUrl?: string;
+  errorDetails?: string;
 };
 
 function buildPollinationsUrl(
@@ -170,6 +171,7 @@ export async function generatePollinationsImage(
       isPlaceholder: true,
       optimizedPrompt: optimized.prompt,
       requestUrl,
+      errorDetails: message,
     };
   }
 }

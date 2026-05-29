@@ -50,7 +50,11 @@ function estimateDuration(text: string): number {
   return Math.max(2, Math.round((words / 150) * 60));
 }
 
+let isElevenLabsKeyInvalid = false;
+let loggedInvalidKeyWarning = false;
+
 export function isElevenLabsConfigured(): boolean {
+  if (isElevenLabsKeyInvalid) return false;
   return Boolean(process.env.ELEVENLABS_API_KEY?.trim());
 }
 
@@ -126,6 +130,13 @@ export async function generateElevenLabsNarration(
           body: errBody,
         }),
       );
+      if (res.status === 401 || errBody.toLowerCase().includes("invalid_api_key") || errBody.toLowerCase().includes("unauthorized")) {
+        isElevenLabsKeyInvalid = true;
+        if (!loggedInvalidKeyWarning) {
+          console.warn("[VisionTale] ElevenLabs API Key is invalid. Falling back to browser SpeechSynthesis.");
+          loggedInvalidKeyWarning = true;
+        }
+      }
       throw new Error(`ElevenLabs API error (HTTP ${res.status}). Check server logs.`);
     }
 

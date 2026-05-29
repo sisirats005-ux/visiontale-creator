@@ -74,6 +74,22 @@ function base64ToAudioBlobUrl(base64Data: string, mimeType = "audio/mpeg"): stri
   }
 }
 
+function buildClientPlaceholderUrl(width: number, height: number, label: string): string {
+  const safeLabel = label.slice(0, 48).replace(/[<>&"']/g, "");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1f3a"/>
+      <stop offset="100%" style="stop-color:#0d1020"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#g)"/>
+  <text x="50%" y="48%" dominant-baseline="middle" text-anchor="middle" fill="#7eb8ff" font-family="system-ui,sans-serif" font-size="22" opacity="0.9">Scene unavailable</text>
+  <text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" fill="#9aa4c7" font-family="ui-monospace,monospace" font-size="12" opacity="0.7">${safeLabel}</text>
+</svg>`;
+  return `data:image/svg+xml;base64,${btoa(svg)}`;
+}
+
 let globalQueueToken = 0;
 
 function HomePage() {
@@ -302,77 +318,98 @@ function HomePage() {
         setGeneratingImageIndex(sceneIndex);
 
         let success = false;
+        let attempts = 0;
+        const maxAttempts = 4; // 1 initial + 3 retries
+        let lastError = "";
 
-        console.log(
-          "[VisionTale] Requesting queued scene image",
-          JSON.stringify({
-            sceneIndex: sceneIndex + 1,
-            seed: scene.index,
-            remainingQueued: imageQueueRef.current.length,
-            promptPreview: promptText.slice(0, 100),
-          }),
-        );
+        console.log("[Image Queue] Starting scene", scene.index);
 
-        try {
-          const res = await generateImageFn({
-            data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
-          });
-
+        while (attempts < maxAttempts && !success) {
           if (queueToken !== globalQueueToken) break;
 
-          if (!res.result) {
-            console.error("[VisionTale] Scene image generation error:", res.error);
-            continue;
-          }
+          attempts++;
+          try {
+            const res = await generateImageFn({
+              data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
+            });
 
-          const finalUrl = res.result.url;
-          if (!finalUrl) {
-            console.error("[VisionTale] Scene image generation returned empty URL");
-            continue;
-          }
+            if (queueToken !== globalQueueToken) break;
 
-          if (res.result.isPlaceholder) {
-            console.warn(
-              "[VisionTale] Scene image placeholder used",
-              JSON.stringify({
-                sceneIndex: sceneIndex + 1,
-                optimizedPrompt: res.result.optimizedPrompt,
-                warning: res.error,
-              }),
-            );
-          } else {
-            console.log(
-              "[VisionTale] Scene image ready",
-              JSON.stringify({
-                sceneIndex: sceneIndex + 1,
-                model: res.result.model,
-                optimizedPromptLength: res.result.optimizedPrompt.length,
-              }),
-            );
+            if (res.error) {
+              throw new Error(res.error);
+            }
+
+            if (!res.result) {
+              throw new Error("No image result returned from server");
+            }
+
+            if (res.result.isPlaceholder) {
+              throw new Error(res.result.errorDetails || "Server returned placeholder");
+            }
+
+            // Success!
+            console.log("[Image Queue] Completed scene", scene.index);
             success = true;
-          }
 
+            const finalUrl = res.result.url;
+            setSceneImages((prev) => {
+              const next = [...prev];
+              next[sceneIndex] = {
+                url: finalUrl,
+                model: res.result!.model,
+                isPlaceholder: false,
+              };
+              sceneImagesRef.current = next;
+              return next;
+            });
+          } catch (err: any) {
+            const errMsg = err.message || String(err);
+            console.error("[Image Queue] Failed scene", scene.index, errMsg);
+            lastError = errMsg;
+
+            // Check if error is retryable (HTTP 402, Queue full, Rate limit, Abort error, placeholder)
+            const isRetryable =
+              errMsg.includes("402") ||
+              errMsg.toLowerCase().includes("queue full") ||
+              errMsg.toLowerCase().includes("rate limit") ||
+              errMsg.toLowerCase().includes("abort") ||
+              errMsg.toLowerCase().includes("timeout") ||
+              errMsg.toLowerCase().includes("placeholder");
+
+            if (isRetryable && attempts < maxAttempts) {
+              console.log(`[Image Queue] Scene ${scene.index} encountered rate limit or abort error. Waiting 15 seconds before retry attempt ${attempts}...`);
+              await wait(15000);
+            } else {
+              break;
+            }
+          }
+        }
+
+        // If all attempts failed, set the placeholder
+        if (!success && queueToken === globalQueueToken) {
+          console.warn(`[Image Queue] Scene ${scene.index} permanently failed. Falling back to client placeholder.`);
+          const placeholderUrl = buildClientPlaceholderUrl(1024, 576, `Scene ${scene.index}`);
           setSceneImages((prev) => {
             const next = [...prev];
             next[sceneIndex] = {
-              url: finalUrl,
-              model: res.result!.model,
-              isPlaceholder: res.result!.isPlaceholder,
+              url: placeholderUrl,
+              model: "turbo",
+              isPlaceholder: true,
             };
             sceneImagesRef.current = next;
             return next;
           });
-        } catch (e) {
-          console.error("[VisionTale] Scene image generation exception:", e);
-        } finally {
-          imageInFlightRef.current[sceneIndex] = false;
-          activeImageRequestInFlightRef.current = false;
-          setGeneratingImageIndex((current) => (current === sceneIndex ? null : current));
         }
 
+        // Clean up flight statuses
+        imageInFlightRef.current[sceneIndex] = false;
+        activeImageRequestInFlightRef.current = false;
+        setGeneratingImageIndex((current) => (current === sceneIndex ? null : current));
+
+        // Strict 10-second wait before next scene
         if (imageQueueRef.current.length > 0 && queueToken === globalQueueToken) {
-          const delay = success ? SCENE_IMAGE_QUEUE_DELAY_MS : SCENE_IMAGE_QUEUE_DELAY_MS + 1000;
-          await wait(delay);
+          console.log("[Image Queue] Waiting before next request");
+          await wait(10000);
         }
       }
     } finally {
