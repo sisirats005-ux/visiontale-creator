@@ -222,12 +222,27 @@ export class VideoExportService {
 
     // 2. Pre-load audio buffers (optional, best-effort)
     const audioBufs: (AudioBuffer | null)[] = await Promise.all(
-      scenes.map((s) =>
-        s.narrationAudio?.url
-          ? loadAudio(s.narrationAudio.url).catch(() => null)
-          : Promise.resolve(null),
-      ),
+      scenes.map((s, i) => {
+        if (s.narrationAudio?.url) {
+          return loadAudio(s.narrationAudio.url)
+            .then((buf) => {
+              console.log(`[Video Export] Audio track found for scene ${i + 1}`);
+              return buf;
+            })
+            .catch((err) => {
+              console.warn(`[Video Export] Narration audio unavailable for scene ${i + 1} — exporting scene as silent. Reason:`, err.message || err);
+              return null;
+            });
+        } else {
+          console.warn(`[Video Export] Narration audio unavailable for scene ${i + 1} — exporting scene as silent.`);
+          return Promise.resolve(null);
+        }
+      }),
     );
+
+    if (!audioBufs.some(Boolean)) {
+      console.warn("[Video Export] No narration audio tracks found — exporting video as completely silent.");
+    }
 
     // 3. Calculate per-scene durations
     const durations = scenes.map((s, i) => {
@@ -284,7 +299,11 @@ export class VideoExportService {
     const audioSources: AudioBufferSourceNode[] = [];
     if (audioBufs.some(Boolean)) {
       try {
-        audioCtx = new AudioContext();
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        if (audioCtx.state === "suspended") {
+          await audioCtx.resume();
+        }
         const dest = audioCtx.createMediaStreamDestination();
 
         let offset = 0;
@@ -301,7 +320,10 @@ export class VideoExportService {
         });
 
         const audioDestTrack = dest.stream.getAudioTracks()[0];
-        if (audioDestTrack) stream.addTrack(audioDestTrack);
+        if (audioDestTrack) {
+          stream.addTrack(audioDestTrack);
+          console.log("[Video Export] Audio track attached");
+        }
       } catch (e) {
         // audio merge failed gracefully — continue without audio
         console.warn("Audio merge failed:", e);
@@ -328,11 +350,13 @@ export class VideoExportService {
       recorder.onerror = () => reject(recorder.error ?? new Error("Video recording failed."));
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: mimeType });
+        console.log("[Video Export] Recording completed");
         resolve(blob);
       };
     });
 
     recorder.start(100); // collect data every 100ms
+    console.log("[Video Export] Recording started");
 
     // 5. Render loop — draw frames synchronously at target fps
     let globalFramesDone = 0;
