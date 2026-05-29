@@ -7,6 +7,11 @@ import { generateStory, type StoryResult as StoryResultType } from "@/lib/servic
 import { generateSceneImage } from "@/lib/services/image.functions";
 import { generateNarration } from "@/lib/services/narration.functions";
 import { getVideoExportService } from "@/lib/services/videoExport.service";
+import {
+  createBrowserSpeechNarration,
+  isBrowserSpeechSupported,
+  loadBrowserSpeechVoices,
+} from "@/lib/services/browserSpeechNarration.service";
 import { GlassCard } from "@/components/GlassCard";
 import { NeonButton } from "@/components/NeonButton";
 import { GenreSelector, type GenreId } from "@/components/GenreSelector";
@@ -164,9 +169,11 @@ function HomePage() {
     setLoading(true);
     setError(null);
     setResult(null);
+    resultRef.current = null;
     revokeNarrationBlobUrls();
     setSceneNarrations([]);
     setSceneImages([]);
+    sceneImagesRef.current = [];
     setGeneratingImageIndex(null);
     setQueuedImageIndexes(new Set());
     imageInFlightRef.current = {};
@@ -232,6 +239,7 @@ function HomePage() {
             elapsedMs: Date.now() - startedAt,
           }),
         );
+        resultRef.current = res.result;
         setResult(res.result);
       }
     } catch (err) {
@@ -386,7 +394,7 @@ function HomePage() {
   const handleGenerateNarration = async (sceneIndex: number) => {
     if (!result) return;
 
-    if (sceneNarrations[sceneIndex]?.url) {
+    if (sceneNarrations[sceneIndex]) {
       console.log("[VisionTale] Narration already exists for scene", sceneIndex + 1);
       return;
     }
@@ -395,6 +403,31 @@ function HomePage() {
 
     const scene = result.scenes[sceneIndex];
     if (!scene?.narration) return;
+
+    const applySpeechFallback = async (reason: string) => {
+      console.warn(
+        "[VisionTale] Using browser SpeechSynthesis narration fallback",
+        JSON.stringify({ sceneIndex: sceneIndex + 1, reason }),
+      );
+
+      if (!isBrowserSpeechSupported()) {
+        setNarrationError(
+          "ElevenLabs narration failed and this browser does not support SpeechSynthesis. Playback continues without voice.",
+        );
+        return;
+      }
+
+      await loadBrowserSpeechVoices();
+      const fallbackAudio = createBrowserSpeechNarration(scene.narration);
+      setSceneNarrations((prev) => {
+        const updated = [...prev];
+        updated[sceneIndex] = fallbackAudio;
+        return updated;
+      });
+      setNarrationError(
+        `Using browser narration fallback for Scene ${sceneIndex + 1}; ElevenLabs was unavailable.`,
+      );
+    };
 
     narrationInFlightRef.current[sceneIndex] = true;
     setGeneratingNarrationIndex(sceneIndex);
@@ -417,11 +450,7 @@ function HomePage() {
       });
 
       if (res.error || !res.result) {
-        console.warn("[VisionTale] Narration failed:", res.error);
-        setNarrationError(
-          res.error ??
-            "Narration generation failed. Cinematic playback will use timed scenes without voice.",
-        );
+        await applySpeechFallback(res.error ?? "ElevenLabs returned no narration audio.");
         return;
       }
 
@@ -438,11 +467,11 @@ function HomePage() {
       }
 
       if (!finalUrl) {
-        setNarrationError("Narration audio was empty. Please try again.");
+        await applySpeechFallback("ElevenLabs returned empty audio data.");
         return;
       }
 
-      const audio: NarrationAudio = { ...serverResult, url: finalUrl };
+      const audio: NarrationAudio = { ...serverResult, url: finalUrl, isFallback: false };
       setSceneNarrations((prev) => {
         const updated = [...prev];
         updated[sceneIndex] = audio;
@@ -450,9 +479,7 @@ function HomePage() {
       });
     } catch (err) {
       console.error("[VisionTale] Narration exception:", err);
-      setNarrationError(
-        "Narration request failed. Check ELEVENLABS_API_KEY. Playback continues without voice.",
-      );
+      await applySpeechFallback(err instanceof Error ? err.message : "Narration network error.");
     } finally {
       narrationInFlightRef.current[sceneIndex] = false;
       setGeneratingNarrationIndex(null);

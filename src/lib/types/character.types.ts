@@ -50,7 +50,7 @@ export interface CinematicScene {
  * Narration and Video Export Types
  */
 
-export type TTSService = "elevenlabs";
+export type TTSService = "elevenlabs" | "speechsynthesis";
 
 /**
  * NarrationAudio — the URL is a blob: URL created on the CLIENT side.
@@ -59,10 +59,13 @@ export type TTSService = "elevenlabs";
  * (URL.createObjectURL, new Audio) inside server functions.
  */
 export interface NarrationAudio {
-  url: string;       // blob: URL — created client-side from base64Data
+  url: string; // blob: URL for ElevenLabs audio; empty when using SpeechSynthesis fallback
   base64Data?: string; // raw base64 audio — present immediately after server response
   duration: number;
   service: TTSService;
+  text?: string; // narration text used by browser SpeechSynthesis fallback
+  voiceName?: string;
+  isFallback?: boolean;
 }
 
 export interface GeneratedImage {
