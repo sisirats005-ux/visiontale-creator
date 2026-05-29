@@ -74,6 +74,8 @@ function base64ToAudioBlobUrl(base64Data: string, mimeType = "audio/mpeg"): stri
   }
 }
 
+let globalQueueToken = 0;
+
 function HomePage() {
   const generate = useServerFn(generateStory);
   const generateNarrationFn = useServerFn(generateNarration);
@@ -98,6 +100,7 @@ function HomePage() {
   const imageQueueRef = useRef<ImageQueueItem[]>([]);
   const imageQueueProcessingRef = useRef(false);
   const imageQueueTokenRef = useRef(0);
+  const activeImageRequestInFlightRef = useRef(false);
   const resultRef = useRef<StoryResultType | null>(null);
   const sceneImagesRef = useRef<SceneImageState[]>([]);
   // Track which scene index is currently generating narration (null = none)
@@ -116,7 +119,12 @@ function HomePage() {
     audioBlobUrlsRef.current.clear();
   }, []);
 
-  useEffect(() => () => revokeNarrationBlobUrls(), [revokeNarrationBlobUrls]);
+  useEffect(() => {
+    return () => {
+      globalQueueToken += 1;
+      revokeNarrationBlobUrls();
+    };
+  }, [revokeNarrationBlobUrls]);
 
   useEffect(() => {
     resultRef.current = result;
@@ -179,7 +187,8 @@ function HomePage() {
     imageInFlightRef.current = {};
     imageQueuedRef.current = {};
     imageQueueRef.current = [];
-    imageQueueTokenRef.current += 1;
+    globalQueueToken += 1;
+    imageQueueTokenRef.current = globalQueueToken;
     setNarrationError(null);
     setCooldownMessage(null);
 
@@ -257,9 +266,14 @@ function HomePage() {
     imageQueueProcessingRef.current = true;
     const queueToken = imageQueueTokenRef.current;
 
+    if (queueToken !== globalQueueToken) {
+      imageQueueProcessingRef.current = false;
+      return;
+    }
+
     try {
       while (imageQueueRef.current.length > 0) {
-        if (queueToken !== imageQueueTokenRef.current) break;
+        if (queueToken !== globalQueueToken) break;
 
         const item = imageQueueRef.current.shift();
         if (!item) continue;
@@ -276,12 +290,14 @@ function HomePage() {
         if (!currentResult) continue;
         if (!force && sceneImagesRef.current[sceneIndex]?.url) continue;
         if (imageInFlightRef.current[sceneIndex]) continue;
+        if (activeImageRequestInFlightRef.current) continue;
 
         const scene = currentResult.scenes[sceneIndex];
         const promptText = scene?.imagePrompt?.trim();
         if (!scene || !promptText) continue;
 
         imageInFlightRef.current[sceneIndex] = true;
+        activeImageRequestInFlightRef.current = true;
         setGeneratingImageIndex(sceneIndex);
 
         console.log(
@@ -299,7 +315,7 @@ function HomePage() {
             data: { prompt: promptText, seed: scene.index, width: 1024, height: 576 },
           });
 
-          if (queueToken !== imageQueueTokenRef.current) break;
+          if (queueToken !== globalQueueToken) break;
 
           if (!res.result) {
             console.error("[VisionTale] Scene image generation error:", res.error);
@@ -346,17 +362,18 @@ function HomePage() {
           console.error("[VisionTale] Scene image generation exception:", e);
         } finally {
           imageInFlightRef.current[sceneIndex] = false;
+          activeImageRequestInFlightRef.current = false;
           setGeneratingImageIndex((current) => (current === sceneIndex ? null : current));
         }
 
-        if (imageQueueRef.current.length > 0 && queueToken === imageQueueTokenRef.current) {
+        if (imageQueueRef.current.length > 0 && queueToken === globalQueueToken) {
           await wait(SCENE_IMAGE_QUEUE_DELAY_MS);
         }
       }
     } finally {
       imageQueueProcessingRef.current = false;
 
-      if (imageQueueRef.current.length > 0) {
+      if (imageQueueRef.current.length > 0 && queueToken === globalQueueToken) {
         void processImageQueue();
       }
     }

@@ -354,7 +354,9 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
   }, [
     advanceScene,
     currentIndex,
-    currentScene,
+    currentScene?.index,
+    currentScene?.title,
+    currentScene?.narration,
     currentScene?.narrationAudio?.duration,
     currentScene?.narrationAudio?.service,
     currentScene?.narrationAudio?.text,

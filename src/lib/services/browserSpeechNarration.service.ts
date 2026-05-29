@@ -118,7 +118,11 @@ export async function speakWithBrowserSpeech(
   if (!isBrowserSpeechSupported()) return null;
 
   await loadBrowserSpeechVoices();
-  window.speechSynthesis.cancel();
+  if (window.speechSynthesis.speaking) {
+    window.speechSynthesis.cancel();
+    // Wait for the browser audio engine to clear to prevent immediately interrupting the new utterance
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
 
   const utterance = new SpeechSynthesisUtterance(text);
   const voice = getBestAvailableVoice();
@@ -149,8 +153,10 @@ export async function speakWithBrowserSpeech(
     pause: pauseBrowserSpeechNarration,
     resume: resumeBrowserSpeechNarration,
     cancel: () => {
-      if (activeUtterance === utterance) activeUtterance = null;
-      window.speechSynthesis.cancel();
+      if (activeUtterance === utterance) {
+        activeUtterance = null;
+        window.speechSynthesis.cancel();
+      }
     },
   };
 }
