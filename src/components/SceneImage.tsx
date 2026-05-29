@@ -30,13 +30,29 @@ export function SceneImage({
 }: SceneImageProps) {
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
   const requestedRef = useRef(false);
+  const imgRef = useRef<HTMLImageElement>(null);
 
-  // BUG FIX #2: Reset status whenever the URL changes (new story generated).
-  // Without this, if a previous story's image errored, the same component
-  // instance keeps status="error" and never shows the new story's image.
+  // Keep local visual status synchronized with the authoritative imageUrl prop.
+  // Data URLs can complete before React's onLoad listener runs; after each URL change,
+  // explicitly inspect the DOM image so a successful response cannot remain stuck
+  // behind the loading overlay.
   useEffect(() => {
-    setStatus(imageUrl ? "loading" : "loading");
     requestedRef.current = false;
+
+    if (!imageUrl) {
+      setStatus("loading");
+      return;
+    }
+
+    setStatus("loading");
+    const frame = window.requestAnimationFrame(() => {
+      const img = imgRef.current;
+      if (img?.complete && img.naturalWidth > 0) {
+        setStatus("loaded");
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
   }, [imageUrl, seed, prompt]);
 
   // Generate once on mount if needed (exactly one request per scene).
@@ -128,6 +144,7 @@ export function SceneImage({
 
         {status !== "error" && imageUrl && (
           <img
+            ref={imgRef}
             src={imageUrl}
             alt={prompt}
             onLoad={handleLoad}

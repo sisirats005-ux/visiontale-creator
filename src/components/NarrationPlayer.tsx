@@ -2,6 +2,11 @@ import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Play, Pause, Volume2, Loader2 } from "lucide-react";
 import type { NarrationAudio } from "@/lib/types/character.types";
+import {
+  cancelBrowserSpeechNarration,
+  type BrowserSpeechHandle,
+  speakWithBrowserSpeech,
+} from "@/lib/services/browserSpeechNarration.service";
 
 interface NarrationPlayerProps {
   narrationAudio?: NarrationAudio;
@@ -17,10 +22,22 @@ export function NarrationPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const speechHandleRef = useRef<BrowserSpeechHandle | null>(null);
+  const speechTimerRef = useRef<number | null>(null);
+  const speechStartedAtRef = useRef(0);
+  const speechElapsedBeforePauseRef = useRef(0);
+  const isSpeechFallback = narrationAudio?.service === "speechsynthesis";
+
+  const clearSpeechTimer = () => {
+    if (speechTimerRef.current) {
+      window.clearInterval(speechTimerRef.current);
+      speechTimerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || isSpeechFallback) return;
 
     const handleTimeUpdate = () => {
       if (audio.duration) {
@@ -46,11 +63,65 @@ export function NarrationPlayer({
       audio.removeEventListener("ended", handleEnded);
       audio.removeEventListener("pause", handlePause);
     };
-  }, [narrationAudio]);
+  }, [isSpeechFallback, narrationAudio]);
+
+  const startSpeechProgressTimer = (duration: number) => {
+    clearSpeechTimer();
+    speechStartedAtRef.current = Date.now();
+    speechTimerRef.current = window.setInterval(() => {
+      const elapsed =
+        speechElapsedBeforePauseRef.current + (Date.now() - speechStartedAtRef.current) / 1000;
+      setProgress(Math.min(100, (elapsed / duration) * 100));
+    }, 100);
+  };
 
   const togglePlay = async () => {
+    if (!narrationAudio) return;
+
+    if (isSpeechFallback) {
+      if (isPlaying) {
+        speechHandleRef.current?.pause();
+        speechElapsedBeforePauseRef.current += (Date.now() - speechStartedAtRef.current) / 1000;
+        clearSpeechTimer();
+        setIsPlaying(false);
+        return;
+      }
+
+      if (speechHandleRef.current) {
+        speechStartedAtRef.current = Date.now();
+        speechHandleRef.current.resume();
+        startSpeechProgressTimer(narrationAudio.duration);
+        setIsPlaying(true);
+        return;
+      }
+
+      speechElapsedBeforePauseRef.current = 0;
+      const handle = await speakWithBrowserSpeech(narrationAudio.text ?? "", {
+        onStart: () => {
+          setIsPlaying(true);
+          startSpeechProgressTimer(narrationAudio.duration);
+        },
+        onBoundary: setProgress,
+        onEnd: () => {
+          clearSpeechTimer();
+          speechHandleRef.current = null;
+          speechElapsedBeforePauseRef.current = 0;
+          setIsPlaying(false);
+          setProgress(0);
+        },
+        onError: (err) => {
+          console.warn("[VisionTale] SpeechSynthesis narration failed:", err);
+          clearSpeechTimer();
+          speechHandleRef.current = null;
+          setIsPlaying(false);
+        },
+      });
+      speechHandleRef.current = handle;
+      return;
+    }
+
     const audio = audioRef.current;
-    if (!audio || !narrationAudio) return;
+    if (!audio) return;
 
     if (isPlaying) {
       audio.pause();
@@ -59,6 +130,7 @@ export function NarrationPlayer({
     }
 
     try {
+      cancelBrowserSpeechNarration();
       await audio.play();
       setIsPlaying(true);
     } catch (err) {
@@ -68,6 +140,8 @@ export function NarrationPlayer({
   };
 
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isSpeechFallback) return;
+
     const audio = audioRef.current;
     if (!audio || !narrationAudio) return;
 
@@ -83,10 +157,14 @@ export function NarrationPlayer({
     const audio = audioRef.current;
     setIsPlaying(false);
     setProgress(0);
+    speechElapsedBeforePauseRef.current = 0;
     return () => {
       audio?.pause();
+      speechHandleRef.current?.cancel();
+      speechHandleRef.current = null;
+      clearSpeechTimer();
     };
-  }, [narrationAudio?.url]);
+  }, [narrationAudio?.url, narrationAudio?.service, narrationAudio?.text]);
 
   if (!narrationAudio && !onGenerate) {
     return null;
@@ -95,9 +173,10 @@ export function NarrationPlayer({
   return (
     <div className="space-y-2">
       {/* Hidden audio element — only render when we have a valid URL */}
-      {narrationAudio && narrationAudio.url && narrationAudio.url.length > 0 && (
-        <audio ref={audioRef} src={narrationAudio.url} preload="auto" />
-      )}
+      {narrationAudio &&
+        narrationAudio.url &&
+        narrationAudio.url.length > 0 &&
+        !isSpeechFallback && <audio ref={audioRef} src={narrationAudio.url} preload="auto" />}
 
       {/* Generate button or player */}
       {!narrationAudio ? (
@@ -167,7 +246,7 @@ export function NarrationPlayer({
 
           {/* Duration display */}
           <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
-            <span>ELEVENLABS</span>
+            <span>{isSpeechFallback ? "BROWSER VOICE FALLBACK" : "ELEVENLABS"}</span>
             <span>{Math.round(narrationAudio.duration)}s</span>
           </div>
         </div>

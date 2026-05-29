@@ -14,6 +14,11 @@ import {
 } from "lucide-react";
 import type { SceneWithNarration } from "@/lib/types/character.types";
 import { TypewriterText } from "./TypewriterText";
+import {
+  cancelBrowserSpeechNarration,
+  type BrowserSpeechHandle,
+  speakWithBrowserSpeech,
+} from "@/lib/services/browserSpeechNarration.service";
 
 interface CinematicPlayerProps {
   scenes: SceneWithNarration[];
@@ -196,6 +201,7 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
 
   const containerRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const speechHandleRef = useRef<BrowserSpeechHandle | null>(null);
   const preloadedAudioRef = useRef<HTMLAudioElement | null>(null);
   const isMutedRef = useRef(isMuted);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,6 +228,7 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
       preloadedAudioRef.current = null;
     }
     const src = currentScene?.narrationAudio?.url;
+    if (currentScene?.narrationAudio?.service === "speechsynthesis") return;
     if (!isOpen || !src || src.length === 0) return;
 
     const preload = new Audio(src);
@@ -235,7 +242,12 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
         preloadedAudioRef.current = null;
       }
     };
-  }, [isOpen, currentIndex, currentScene?.narrationAudio?.url]);
+  }, [
+    isOpen,
+    currentIndex,
+    currentScene?.narrationAudio?.service,
+    currentScene?.narrationAudio?.url,
+  ]);
 
   // ── hide controls after inactivity ──────────────────────────────────────
   const resetControlsTimer = useCallback(() => {
@@ -276,14 +288,32 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
       audioRef.current.pause();
       audioRef.current = null;
     }
+    speechHandleRef.current?.cancel();
+    speechHandleRef.current = null;
 
     if (!isOpen || !isPlaying || !currentScene) return;
 
     let duration = DEFAULT_SCENE_DURATION;
+    let cancelled = false;
 
-    // FIX: Guard against empty URL — base64→blob conversion can yield "" on failure.
-    // An empty src causes a broken audio element with misleading console errors.
-    if (currentScene.narrationAudio?.url && currentScene.narrationAudio.url.length > 0) {
+    if (currentScene.narrationAudio?.service === "speechsynthesis") {
+      duration = Math.max(DEFAULT_SCENE_DURATION, currentScene.narrationAudio.duration + 0.5);
+      void speakWithBrowserSpeech(currentScene.narrationAudio.text ?? currentScene.narration, {
+        volume: isMutedRef.current ? 0 : 0.9,
+        onError: (e) => {
+          console.warn("[VisionTale] Cinematic SpeechSynthesis narration failed:", e);
+        },
+      }).then((handle) => {
+        if (cancelled) {
+          handle?.cancel();
+          return;
+        }
+        speechHandleRef.current = handle;
+      });
+    } else if (currentScene.narrationAudio?.url && currentScene.narrationAudio.url.length > 0) {
+      // Guard against empty URL — base64→blob conversion can yield "" on failure.
+      // An empty src causes a broken audio element with misleading console errors.
+      cancelBrowserSpeechNarration();
       const audio =
         preloadedAudioRef.current?.src === currentScene.narrationAudio.url
           ? preloadedAudioRef.current
@@ -311,18 +341,23 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
     }, duration * 1000);
 
     return () => {
+      cancelled = true;
       if (playTimerRef.current) clearTimeout(playTimerRef.current);
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
       }
+      speechHandleRef.current?.cancel();
+      speechHandleRef.current = null;
     };
   }, [
     advanceScene,
     currentIndex,
     currentScene,
     currentScene?.narrationAudio?.duration,
+    currentScene?.narrationAudio?.service,
+    currentScene?.narrationAudio?.text,
     currentScene?.narrationAudio?.url,
     isOpen,
     isPlaying,
@@ -332,6 +367,8 @@ export function CinematicPlayer({ scenes, isOpen, onClose }: CinematicPlayerProp
   useEffect(() => {
     isMutedRef.current = isMuted;
     if (audioRef.current) audioRef.current.muted = isMuted;
+    // SpeechSynthesis does not expose reliable live volume changes; new fallback
+    // utterances honor the current muted state when each scene starts.
   }, [isMuted]);
 
   // ── intro animation ──────────────────────────────────────────────────────
