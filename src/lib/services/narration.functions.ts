@@ -14,6 +14,41 @@ const NarrationInputSchema = z.object({
   options: NarrationOptionsSchema.optional(),
 });
 
+async function generateGoogleTTS(text: string): Promise<string> {
+  const chunks: string[] = [];
+  let currentChunk = "";
+  const words = text.split(" ");
+  for (const word of words) {
+    if ((currentChunk + " " + word).length > 200) {
+      chunks.push(currentChunk.trim());
+      currentChunk = word;
+    } else {
+      currentChunk = currentChunk ? `${currentChunk} ${word}` : word;
+    }
+  }
+  if (currentChunk) {
+    chunks.push(currentChunk.trim());
+  }
+
+  const buffers: Buffer[] = [];
+  for (const chunk of chunks) {
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=${encodeURIComponent(chunk)}`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Google TTS HTTP error ${res.status}`);
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    buffers.push(Buffer.from(arrayBuffer));
+  }
+
+  const combinedBuffer = Buffer.concat(buffers);
+  return combinedBuffer.toString("base64");
+}
+
 /**
  * ElevenLabs narration — one server request per invocation.
  * Client converts base64 → blob URL for playback/export.
@@ -25,12 +60,27 @@ export const generateNarration = createServerFn({ method: "POST" })
     const narrationService = getNarrationService();
 
     if (!narrationService.isServiceAvailable()) {
-      console.warn("[VisionTale] Narration skipped — ELEVENLABS_API_KEY is not set.");
-      return {
-        result: null,
-        error:
-          "Narration requires ELEVENLABS_API_KEY in your .env.local file. Story and visuals still work without it.",
-      };
+      console.log("[VisionTale] ElevenLabs is unavailable. Using Google Translate TTS fallback.");
+      try {
+        const base64Data = await generateGoogleTTS(data.text);
+        const duration = Math.max(2, Math.round((data.text.split(" ").length / 150) * 60));
+        return {
+          result: {
+            url: "",
+            base64Data,
+            duration,
+            service: "google-tts",
+            isFallback: true,
+          },
+          error: null,
+        };
+      } catch (err) {
+        console.error("[VisionTale] Google Translate TTS fallback failed:", err);
+        return {
+          result: null,
+          error: "Failed to generate fallback narration audio.",
+        };
+      }
     }
 
     console.log(
@@ -58,7 +108,24 @@ export const generateNarration = createServerFn({ method: "POST" })
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[VisionTale] generateNarration failed:", err);
-      return { result: null, error: `Narration generation failed: ${msg}` };
+      console.log("[VisionTale] ElevenLabs request failed. Using Google Translate TTS fallback.");
+      try {
+        const base64Data = await generateGoogleTTS(data.text);
+        const duration = Math.max(2, Math.round((data.text.split(" ").length / 150) * 60));
+        return {
+          result: {
+            url: "",
+            base64Data,
+            duration,
+            service: "google-tts",
+            isFallback: true,
+          },
+          error: null,
+        };
+      } catch (fallbackErr) {
+        console.error("[VisionTale] Google Translate TTS fallback also failed:", fallbackErr);
+        return { result: null, error: `Narration generation failed: ${msg}` };
+      }
     }
   });
 

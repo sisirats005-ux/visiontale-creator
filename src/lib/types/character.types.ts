@@ -50,7 +50,7 @@ export interface CinematicScene {
  * Narration and Video Export Types
  */
 
-export type TTSService = "elevenlabs" | "speechsynthesis";
+export type TTSService = "elevenlabs" | "speechsynthesis" | "google-tts";
 
 /**
  * NarrationAudio — the URL is a blob: URL created on the CLIENT side.

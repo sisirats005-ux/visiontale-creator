@@ -23,6 +23,7 @@ import type {
   ExportedVideo,
   SceneWithNarration,
 } from "@/lib/types/character.types";
+import { generateNarration } from "./narration.functions";
 
 export interface VideoExportConfig {
   canvasWidth?: number;
@@ -220,23 +221,67 @@ export class VideoExportService {
 
     onProgress?.({ step: "generating-audio", percentage: 10 });
 
-    // 2. Pre-load audio buffers (optional, best-effort)
+    // 2. Pre-load audio buffers (optional, best-effort, generating fallback audio dynamically if needed)
     const audioBufs: (AudioBuffer | null)[] = await Promise.all(
-      scenes.map((s, i) => {
-        if (s.narrationAudio?.url) {
-          return loadAudio(s.narrationAudio.url)
-            .then((buf) => {
+      scenes.map(async (s, i) => {
+        const hasUrl = !!s.narrationAudio?.url;
+        const isSpeechSynthesis = s.narrationAudio?.service === "speechsynthesis";
+
+        if (hasUrl && !isSpeechSynthesis) {
+          try {
+            const buf = await loadAudio(s.narrationAudio.url);
+            console.log(`[Video Export] Audio track found for scene ${i + 1}`);
+            return buf;
+          } catch (err: any) {
+            console.warn(`[Video Export] Narration audio load failed for scene ${i + 1}. Reason:`, err.message || err);
+          }
+        }
+
+        // If we don't have a valid audio URL, or if it uses client-only speechsynthesis fallback,
+        // dynamically generate a real audio track from the server's TTS/Google-TTS fallback
+        if (s.narration) {
+          console.log(`[Video Export] SpeechSynthesis or missing audio detected for scene ${i + 1}. Dynamically generating real audio file...`);
+          try {
+            const res = await generateNarration({
+              data: {
+                text: s.narration,
+                options: {
+                  model: "eleven_multilingual_v2",
+                  voiceId: "Rachel",
+                },
+              },
+            });
+
+            if (res.error || !res.result || !res.result.base64Data) {
+              throw new Error(res.error || "No audio data returned from server fallback");
+            }
+
+            const base64Data = res.result.base64Data;
+            const byteCharacters = atob(base64Data);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let j = 0; j < byteCharacters.length; j++) {
+              byteNumbers[j] = byteCharacters.charCodeAt(j);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: "audio/mpeg" });
+            const blobUrl = URL.createObjectURL(blob);
+
+            try {
+              const buf = await loadAudio(blobUrl);
               console.log(`[Video Export] Audio track found for scene ${i + 1}`);
               return buf;
-            })
-            .catch((err) => {
-              console.warn(`[Video Export] Narration audio unavailable for scene ${i + 1} — exporting scene as silent. Reason:`, err.message || err);
-              return null;
-            });
-        } else {
-          console.warn(`[Video Export] Narration audio unavailable for scene ${i + 1} — exporting scene as silent.`);
-          return Promise.resolve(null);
+            } finally {
+              try {
+                URL.revokeObjectURL(blobUrl);
+              } catch {}
+            }
+          } catch (err: any) {
+            console.warn(`[Video Export] Failed to generate dynamic fallback audio for scene ${i + 1}. Scene will be exported as silent. Reason:`, err.message || err);
+          }
         }
+
+        console.warn(`[Video Export] Narration audio unavailable for scene ${i + 1} — exporting scene as silent.`);
+        return null;
       }),
     );
 
@@ -331,6 +376,29 @@ export class VideoExportService {
         audioCtx = null;
       }
     }
+
+    // Determine narration source type for diagnostics
+    let sourceType = "silent";
+    if (audioBufs.some(Boolean)) {
+      const activeServices = scenes
+        .map((s) => s.narrationAudio?.service)
+        .filter(Boolean);
+      if (activeServices.includes("elevenlabs")) {
+        sourceType = "elevenlabs";
+      } else if (activeServices.includes("google-tts")) {
+        sourceType = "google-tts";
+      } else if (activeServices.includes("speechsynthesis")) {
+        // If it was speechsynthesis but we successfully generated and loaded buffers,
+        // it means we used the fallback generator (which resolves to elevenlabs or google-tts)
+        sourceType = "google-tts";
+      } else {
+        sourceType = "unknown";
+      }
+    }
+
+    console.log("[Export Debug] Audio tracks:", stream.getAudioTracks().length);
+    console.log("[Export Debug] Video tracks:", stream.getVideoTracks().length);
+    console.log("[Export Debug] Narration source:", sourceType);
 
     const chunks: Blob[] = [];
     const recorder = new MediaRecorder(stream, {
